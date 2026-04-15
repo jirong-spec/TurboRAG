@@ -96,6 +96,12 @@ static uint32_t unpack_4bit_host(const uint8_t* buf, int idx) {
     return (idx & 1) ? ((x >> 4) & 0xFu) : (x & 0xFu);
 }
 
+static uint32_t unpack_1bit_host(const uint8_t* buf, int idx) {
+    int byte_idx = idx >> 3;
+    int bit_off = idx & 7;
+    return (buf[byte_idx] >> bit_off) & 0x1u;
+}
+
 static void make_rot_domain_host(
     const std::vector<half>& src,
     int token_idx,
@@ -186,36 +192,49 @@ static void dump_debug_token_head(
     std::cout << "v_scale=" << v_scale << "\n";
 
     std::cout << "\nK original-domain first 16 dims:\n";
-    std::cout << "dim  orig        code3  deq\n";
+    std::cout << "dim  orig        code3  rbit  deq\n";
     for (int d = 0; d < 16; ++d) {
         uint32_t c = unpack_3bit_host(k3, d);
+        uint32_t r = unpack_1bit_host(kres, d);
         float x0 = __half2float(h_k[base + d]);
         float x1 = __half2float(h_k_deq[base + d]);
         std::cout << std::setw(3) << d << "  "
-                  << std::setw(10) << x0 << "  "
-                  << std::setw(5) << c << "  "
-                  << std::setw(10) << x1 << "\n";
+                << std::setw(10) << x0 << "  "
+                << std::setw(5) << c << "  "
+                << std::setw(4) << r << "  "
+                << std::setw(10) << x1 << "\n";
     }
 
     std::cout << "\\nK rotated first 16 dims:\\n";
-    std::cout << "dim  rot_orig     pack_rot      kn       kidx  code3  code*scale  rot_deq\\n";
+    std::cout << "dim  rot_orig     pack_rot      kn       kidx  code3  rbit  recon*scale  rot_deq\n";
     for (int d = 0; d < 16; ++d) {
         uint32_t c = unpack_3bit_host(k3, d);
-        float rec = kK3Codebook[c] * k_scale;
+        uint32_t r = unpack_1bit_host(kres, d);
+        float kresidual = r ? 0.125f : -0.125f;
+        float rec = (kK3Codebook[c] + kresidual) * k_scale;
+
         std::cout << std::setw(3) << d << "  "
-                  << std::setw(10) << k_rot_orig[d] << "  "
-                  << std::setw(10) << h_k_rot_dbg[base + d] << "  "
-                  << std::setw(8) << h_kn_dbg[base + d] << "  "
-                  << std::setw(5) << h_kidx_dbg[base + d] << "  "
-                  << std::setw(5) << c << "  "
-                  << std::setw(10) << rec << "  "
-                  << std::setw(10) << k_rot_deq[d] << "\\n";
+                << std::setw(10) << k_rot_orig[d] << "  "
+                << std::setw(10) << h_k_rot_dbg[base + d] << "  "
+                << std::setw(8) << h_kn_dbg[base + d] << "  "
+                << std::setw(5) << h_kidx_dbg[base + d] << "  "
+                << std::setw(5) << c << "  "
+                << std::setw(4) << r << "  "
+                << std::setw(11) << rec << "  "
+                << std::setw(10) << k_rot_deq[d] << "\n";
     }
 
     std::cout << "\nK residual bytes first 8:\n";
     for (int i = 0; i < std::min(8, layout.kres_bytes_per_token_head); ++i) {
         std::cout << int(kres[i]) << (i + 1 == std::min(8, layout.kres_bytes_per_token_head) ? '\n' : ' ');
     }
+
+    std::cout << "K residual bits first 16:\n";
+    for (int d = 0; d < std::min(16, D); ++d) {
+        std::cout << int(unpack_1bit_host(kres, d))
+                << (d + 1 == std::min(16, D) ? '\n' : ' ');
+    }
+
 
     std::cout << "\nV original-domain first 16 dims:\n";
     std::cout << "dim  orig        code4  deq\n";
@@ -245,14 +264,15 @@ static void dump_debug_token_head(
 
     }
 
-    for (int i = 0; i < 8; ++i) {
-    	std::cout << int(k3[i]) << " ";
+    std::cout << "\nK code bytes first 8:\n";
+    for (int i = 0; i < std::min(8, layout.k3_bytes_per_token_head); ++i) {
+        std::cout << int(k3[i]) << (i + 1 == std::min(8, layout.k3_bytes_per_token_head) ? '\n' : ' ');
     }
-    std::cout << "\n";
-    for (int i = 0; i < 8; ++i) {
-    	std::cout << int(v4[i]) << " ";
+
+    std::cout << "V code bytes first 8:\n";
+    for (int i = 0; i < std::min(8, layout.v4_bytes_per_token_head); ++i) {
+        std::cout << int(v4[i]) << (i + 1 == std::min(8, layout.v4_bytes_per_token_head) ? '\n' : ' ');
     }
-    std::cout << "\n";
 }
 
 int main() {
@@ -284,7 +304,7 @@ int main() {
     const int num_blocks = (num_kv_tokens + cfg.block_size - 1) / cfg.block_size;
     const size_t page_pool_bytes = (size_t)num_blocks * layout.page_size_bytes;
 
-    std::cout << "=== V6a Layout (3-bit K, 4-bit V, residual OFF) ===\n";
+    std::cout << "=== V6b Layout (3-bit K + 1-bit residual, 4-bit V, residual ON) ===\n";
     std::cout << "head_dim=" << D
               << " num_heads=" << H
               << " block_size=" << cfg.block_size
@@ -437,7 +457,7 @@ int main() {
     mse_vs_deq /= std::max<size_t>(1, h_logits.size());
     abs_mean_vs_deq /= std::max<size_t>(1, h_logits.size());
 
-    std::cout << "\n=== V6a Results ===\n";
+    std::cout << "\n=== V6b Results ===\n";
     std::cout << "pack_ms=" << pack_ms << "\n";
     std::cout << "dequant_ms=" << dequant_ms << "\n";
     std::cout << "fused_logits_ms=" << fused_ms << "\n";

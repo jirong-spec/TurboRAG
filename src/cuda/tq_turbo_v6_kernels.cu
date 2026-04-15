@@ -140,6 +140,20 @@ __device__ __forceinline__ uint8_t pack_3bit_byte_from_codes(const int* codes, i
     return out;
 }
 
+__device__ __forceinline__ uint8_t pack_1bit_byte_from_bits(const int* bits, int byte_idx, int D) {
+    uint8_t out = 0;
+    int base = byte_idx * 8;
+
+    #pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        int idx = base + i;
+        if (idx < D) {
+            out |= (uint8_t)((bits[idx] & 1) << i);
+        }
+    }
+    return out;
+}
+
 
 template<int MAX_D>
 __device__ void hadamard_inplace(float* x, int D) {
@@ -213,6 +227,7 @@ __global__ void turbo_v6_pack_kv_kernel(
 
     __shared__ int kidx_s[256];
     __shared__ int vidx_s[256];
+    __shared__ int krbit_s[256];
 
     int base = (token_idx * cfg.num_kv_heads + head_idx) * D;
 
@@ -262,9 +277,13 @@ __global__ void turbo_v6_pack_kv_kernel(
     float vn = clamp_val(sv[tid] / vrms, -2.75f, 2.75f);
 
     int kidx = nearest_k3_idx(kn);
+    float kbase = kK3Codebook[kidx];
+    int krbit = (kn >= kbase) ? 1 : 0;
+
     int vidx = nearest_v4_idx(vn);
 
     kidx_s[tid] = kidx;
+    krbit_s[tid] = krbit;
     vidx_s[tid] = vidx;
 
     if (debug_kn) debug_kn[base + tid] = kn;
@@ -277,6 +296,10 @@ __global__ void turbo_v6_pack_kv_kernel(
         // K: byte-owner parallel pack, one thread owns one output byte.
     if (tid < layout.k3_bytes_per_token_head) {
         k3_codes[tid] = pack_3bit_byte_from_codes(kidx_s, tid, D);
+    }
+
+    if (tid < layout.kres_bytes_per_token_head) {
+        kres[tid] = pack_1bit_byte_from_bits(krbit_s, tid, D);
     }
 
     // V: pair-wise pack, one thread owns one byte.
@@ -337,9 +360,11 @@ __global__ void turbo_v6_dequant_kv_kernel(
     float vs = h2f(*vscale);
 
     uint8_t kidx = unpack_3bit_get(k3_codes, tid);
+    uint8_t kr = unpack_1bit_get(kres, tid);
     uint8_t vidx = unpack_4bit_get(v4_codes, tid);
-
-    float kval = kK3Codebook[kidx];
+    
+    float kresidual = kr ? 0.125f : -0.125f;
+    float kval = kK3Codebook[kidx] + kresidual;
     float vval = kV4Codebook[vidx];
 
     sk[tid] = kval * ks;
@@ -417,8 +442,10 @@ __global__ void turbo_v6_fused_attention_logits_kernel(
 
         float ks = h2f(*kscale);
         uint8_t kidx = unpack_3bit_get(k3_codes, tid);
+        uint8_t kr = unpack_1bit_get(kres, tid);
 
-        float kval = kK3Codebook[kidx];
+        float kresidual = kr ? 0.125f : -0.125f;
+        float kval = kK3Codebook[kidx] + kresidual;
 
         /*
         Approximate rotated-domain K
