@@ -123,6 +123,24 @@ __device__ __forceinline__ uint8_t unpack_4bit_get(const uint8_t* src, int idx) 
     return ((idx & 1) == 0) ? (src[byte] & 0x0F) : ((src[byte] >> 4) & 0x0F);
 }
 
+__device__ __forceinline__ uint8_t pack_3bit_byte_from_codes(const int* codes, int byte_idx, int D) {
+    uint8_t out = 0;
+    int bit_base = byte_idx * 8;
+
+    #pragma unroll
+    for (int k = 0; k < 8; ++k) {
+        int global_bit = bit_base + k;
+        int code_idx = global_bit / 3;
+        if (code_idx < D) {
+            int bit_in_code = global_bit % 3;
+            uint8_t bit = (uint8_t)((codes[code_idx] >> bit_in_code) & 1);
+            out |= (uint8_t)(bit << k);
+        }
+    }
+    return out;
+}
+
+
 template<int MAX_D>
 __device__ void hadamard_inplace(float* x, int D) {
     for (int len = 1; len < D; len <<= 1) {
@@ -256,12 +274,12 @@ __global__ void turbo_v6_pack_kv_kernel(
 
     __syncthreads();
 
-    if (tid == 0) {
-        for (int d = 0; d < D; ++d) {
-            pack_3bit_set(k3_codes, d, (uint8_t)kidx_s[d]);
-        }
+        // K: byte-owner parallel pack, one thread owns one output byte.
+    if (tid < layout.k3_bytes_per_token_head) {
+        k3_codes[tid] = pack_3bit_byte_from_codes(kidx_s, tid, D);
     }
 
+    // V: pair-wise pack, one thread owns one byte.
     if (tid < (D >> 1)) {
         int i0 = 2 * tid;
         int i1 = i0 + 1;

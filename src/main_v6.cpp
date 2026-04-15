@@ -359,7 +359,7 @@ int main() {
     CUDA_CHECK(cudaEventRecord(e0));
     launch_tq_turbo_v6_pack_kv(
         d_k, d_v, d_slot, d_page_pool, layout, cfg, num_kv_tokens, 0,
-        d_k_rot_dbg, d_v_rot_dbg, d_kn_dbg, d_vn_dbg, d_kidx_dbg, d_vidx_dbg);
+        nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
     CUDA_CHECK(cudaEventRecord(e1));
     CUDA_CHECK(cudaEventSynchronize(e1));
     float pack_ms = 0.0f;
