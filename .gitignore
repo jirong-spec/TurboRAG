@@ -1,0 +1,30 @@
+# Build artifacts
+build/
+*.o
+*.so
+*.so.*
+*.a
+
+# Ollama extracted libs (not part of source)
+libggml-base.so
+libggml-base.so.0
+libggml-base.so.0.0.0
+lib/
+
+# Output / generated files
+output/
+
+# Claude internal
+.claude/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.eggs/
+
+# Editor / OS
+.vscode/
+.DS_Store
+*.swp

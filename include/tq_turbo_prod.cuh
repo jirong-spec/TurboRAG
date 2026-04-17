@@ -4,19 +4,14 @@
 #include <cstdint>
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include "tq_config.h"
 
-struct TQConfig {
-    int num_kv_heads;
-    int head_dim;
-    int block_size;
-    int group_size;
-};
-
-struct TQTurboV6PageLayout {
+struct TQTurboProdPageLayout {
     size_t page_size_bytes;
 
     size_t k3_codes_offset;
     size_t k_residual_offset;
+    size_t k_residual_scales_offset;
     size_t k_scales_offset;
 
     size_t v4_codes_offset;
@@ -44,9 +39,7 @@ __host__ __device__ inline int packed_4bit_bytes(int n) {
     return ceil_div_int(n, 2);
 }
 
-TQTurboV6PageLayout make_tq_turbo_v6_page_layout(const TQConfig& cfg);
-
-__host__ __device__ inline size_t turbo_v6_token_head_offset(
+__host__ __device__ inline size_t turbo_prod_token_head_offset(
     int token_in_block,
     int head_idx,
     int num_kv_heads,
@@ -54,12 +47,18 @@ __host__ __device__ inline size_t turbo_v6_token_head_offset(
     return ((size_t)token_in_block * num_kv_heads + head_idx) * bytes_per_token_head;
 }
 
-void launch_tq_turbo_v6_pack_kv(
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+TQTurboProdPageLayout make_tq_turbo_prod_page_layout(const TQConfig& cfg);
+
+void launch_tq_turbo_prod_pack_kv(
     const half* key,
     const half* value,
     const int32_t* slot_mapping,
     uint8_t* page_pool,
-    const TQTurboV6PageLayout& layout,
+    const TQTurboProdPageLayout& layout,
     const TQConfig& cfg,
     int num_tokens,
     cudaStream_t stream,
@@ -70,23 +69,38 @@ void launch_tq_turbo_v6_pack_kv(
     int* debug_kidx = nullptr,
     int* debug_vidx = nullptr);
 
-void launch_tq_turbo_v6_dequant_kv(
+void launch_tq_turbo_prod_dequant_kv(
     const uint8_t* page_pool,
     const int32_t* slot_mapping,
     half* out_key,
     half* out_value,
-    const TQTurboV6PageLayout& layout,
+    const TQTurboProdPageLayout& layout,
     const TQConfig& cfg,
     int num_tokens,
     cudaStream_t stream);
 
-void launch_tq_turbo_v6_fused_attention_logits(
+void launch_tq_turbo_prod_fused_attention_logits(
     const half* query,
     const uint8_t* page_pool,
     const int32_t* slot_mapping,
     float* logits,
-    const TQTurboV6PageLayout& layout,
+    const TQTurboProdPageLayout& layout,
     const TQConfig& cfg,
     int num_queries,
     int num_kv_tokens,
     cudaStream_t stream);
+
+void launch_tq_turbo_prod_fused_attention_output(
+    const half* query,
+    const uint8_t* page_pool,
+    const int32_t* slot_mapping,
+    half* output,
+    const TQTurboProdPageLayout& layout,
+    const TQConfig& cfg,
+    int num_queries,
+    int num_kv_tokens,
+    cudaStream_t stream);
+
+#ifdef __cplusplus
+}
+#endif

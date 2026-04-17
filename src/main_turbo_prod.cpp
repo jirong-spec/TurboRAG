@@ -10,7 +10,7 @@
 #include <algorithm>
 #include <iomanip>
 
-#include "tq_turbo_v6.cuh"
+#include "tq_turbo_prod.cuh"
 
 #define CUDA_CHECK(x) do {                                           \
     cudaError_t err__ = (x);                                         \
@@ -124,7 +124,7 @@ static void make_rot_domain_host(
 
 static void dump_debug_token_head(
     const std::vector<uint8_t>& h_page_pool,
-    const TQTurboV6PageLayout& layout,
+    const TQTurboProdPageLayout& layout,
     const TQConfig& cfg,
     const std::vector<half>& h_k,
     const std::vector<half>& h_v,
@@ -140,8 +140,8 @@ static void dump_debug_token_head(
     int head_idx) {
 
     static const float kK3Codebook[8] = {
-        -2.40f, -1.45f, -0.82f, -0.24f,
-         0.24f,  0.82f,  1.45f,  2.40f
+        -2.1513f, -1.34326f, -0.755526f, -0.244919f,
+         0.244919f, 0.755526f, 1.34326f, 2.1513f
     };
 
     static const float kV4Codebook[16] = {
@@ -155,23 +155,27 @@ static void dump_debug_token_head(
     const int token_in_block = token_idx % cfg.block_size;
     const size_t page_base = (size_t)block_idx * layout.page_size_bytes;
 
-    const size_t off_k3 = turbo_v6_token_head_offset(
+    const size_t off_k3 = turbo_prod_token_head_offset(
         token_in_block, head_idx, cfg.num_kv_heads, layout.k3_bytes_per_token_head);
-    const size_t off_kres = turbo_v6_token_head_offset(
+    const size_t off_kres = turbo_prod_token_head_offset(
         token_in_block, head_idx, cfg.num_kv_heads, layout.kres_bytes_per_token_head);
-    const size_t off_ks = turbo_v6_token_head_offset(
+    const size_t off_ks = turbo_prod_token_head_offset(
         token_in_block, head_idx, cfg.num_kv_heads, layout.scale_bytes_per_token_head);
-    const size_t off_v4 = turbo_v6_token_head_offset(
+    const size_t off_v4 = turbo_prod_token_head_offset(
         token_in_block, head_idx, cfg.num_kv_heads, layout.v4_bytes_per_token_head);
-    const size_t off_vs = turbo_v6_token_head_offset(
+    const size_t off_vs = turbo_prod_token_head_offset(
         token_in_block, head_idx, cfg.num_kv_heads, layout.scale_bytes_per_token_head);
 
     const uint8_t* k3 = h_page_pool.data() + page_base + layout.k3_codes_offset + off_k3;
     const uint8_t* kres = h_page_pool.data() + page_base + layout.k_residual_offset + off_kres;
     const uint8_t* v4 = h_page_pool.data() + page_base + layout.v4_codes_offset + off_v4;
 
+    const size_t off_kres_scale = turbo_prod_token_head_offset(
+        token_in_block, head_idx, cfg.num_kv_heads, layout.scale_bytes_per_token_head);
     const half* ks = reinterpret_cast<const half*>(
         h_page_pool.data() + page_base + layout.k_scales_offset + off_ks);
+    const half* kres_s = reinterpret_cast<const half*>(
+        h_page_pool.data() + page_base + layout.k_residual_scales_offset + off_kres_scale);
     const half* vs = reinterpret_cast<const half*>(
         h_page_pool.data() + page_base + layout.v_scales_offset + off_vs);
 
@@ -184,11 +188,12 @@ static void dump_debug_token_head(
     make_rot_domain_host(h_k_deq, token_idx, head_idx, cfg, k_rot_deq);
     make_rot_domain_host(h_v_deq, token_idx, head_idx, cfg, v_rot_deq);
 
-    float k_scale = __half2float(ks[0]);
-    float v_scale = __half2float(vs[0]);
+    float k_scale    = __half2float(ks[0]);
+    float k_res_rms  = __half2float(kres_s[0]);
+    float v_scale    = __half2float(vs[0]);
 
     std::cout << "\n=== DEBUG token=" << token_idx << " head=" << head_idx << " ===\n";
-    std::cout << "k_scale=" << k_scale << "\n";
+    std::cout << "k_scale=" << k_scale << "  k_residual_rms=" << k_res_rms << "\n";
     std::cout << "v_scale=" << v_scale << "\n";
 
     std::cout << "\nK original-domain first 16 dims:\n";
@@ -205,12 +210,12 @@ static void dump_debug_token_head(
                 << std::setw(10) << x1 << "\n";
     }
 
-    std::cout << "\\nK rotated first 16 dims:\\n";
+    std::cout << "\nK rotated first 16 dims:\n";
     std::cout << "dim  rot_orig     pack_rot      kn       kidx  code3  rbit  recon*scale  rot_deq\n";
     for (int d = 0; d < 16; ++d) {
         uint32_t c = unpack_3bit_host(k3, d);
         uint32_t r = unpack_1bit_host(kres, d);
-        float kresidual = r ? 0.125f : -0.125f;
+        float kresidual = k_res_rms * (r ? 1.0f : -1.0f);  // QJL residual: r_e * sign_e
         float rec = (kK3Codebook[c] + kresidual) * k_scale;
 
         std::cout << std::setw(3) << d << "  "
@@ -248,8 +253,8 @@ static void dump_debug_token_head(
                   << std::setw(10) << x1 << "\n";
     }
 
-    std::cout << "\\nV rotated first 16 dims:\\n";
-    std::cout << "dim  rot_orig     pack_rot      vn       vidx  code4  code*scale  rot_deq\\n";
+    std::cout << "\nV rotated first 16 dims:\n";
+    std::cout << "dim  rot_orig     pack_rot      vn       vidx  code4  code*scale  rot_deq\n";
     for (int d = 0; d < 16; ++d) {
         uint32_t c = unpack_4bit_host(v4, d);
         float rec = kV4Codebook[c] * v_scale;
@@ -260,7 +265,7 @@ static void dump_debug_token_head(
                   << std::setw(5) << h_vidx_dbg[base + d] << "  "
                   << std::setw(5) << c << "  "
                   << std::setw(10) << rec << "  "
-                  << std::setw(10) << v_rot_deq[d] << "\\n";
+                  << std::setw(10) << v_rot_deq[d] << "\n";
 
     }
 
@@ -300,7 +305,7 @@ int main() {
     std::vector<int32_t> h_slot_mapping(num_kv_tokens);
     for (int i = 0; i < num_kv_tokens; ++i) h_slot_mapping[i] = i;
 
-    TQTurboV6PageLayout layout = make_tq_turbo_v6_page_layout(cfg);
+    TQTurboProdPageLayout layout = make_tq_turbo_prod_page_layout(cfg);
     const int num_blocks = (num_kv_tokens + cfg.block_size - 1) / cfg.block_size;
     const size_t page_pool_bytes = (size_t)num_blocks * layout.page_size_bytes;
 
@@ -377,7 +382,7 @@ int main() {
     CUDA_CHECK(cudaEventCreate(&e1));
 
     CUDA_CHECK(cudaEventRecord(e0));
-    launch_tq_turbo_v6_pack_kv(
+    launch_tq_turbo_prod_pack_kv(
         d_k, d_v, d_slot, d_page_pool, layout, cfg, num_kv_tokens, 0,
         nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
     CUDA_CHECK(cudaEventRecord(e1));
@@ -386,7 +391,7 @@ int main() {
     CUDA_CHECK(cudaEventElapsedTime(&pack_ms, e0, e1));
 
     CUDA_CHECK(cudaEventRecord(e0));
-    launch_tq_turbo_v6_dequant_kv(
+    launch_tq_turbo_prod_dequant_kv(
         d_page_pool, d_slot, d_k_deq, d_v_deq, layout, cfg, num_kv_tokens, 0);
     CUDA_CHECK(cudaEventRecord(e1));
     CUDA_CHECK(cudaEventSynchronize(e1));
@@ -394,7 +399,7 @@ int main() {
     CUDA_CHECK(cudaEventElapsedTime(&dequant_ms, e0, e1));
 
     CUDA_CHECK(cudaEventRecord(e0));
-    launch_tq_turbo_v6_fused_attention_logits(
+    launch_tq_turbo_prod_fused_attention_logits(
         d_q, d_page_pool, d_slot, d_logits, layout, cfg, num_queries, num_kv_tokens, 0);
     CUDA_CHECK(cudaEventRecord(e1));
     CUDA_CHECK(cudaEventSynchronize(e1));
