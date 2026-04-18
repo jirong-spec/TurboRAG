@@ -16,7 +16,7 @@ dataset:
   # local_path: "data/my_corpus.csv"
 
   # How many rows to load (keeps memory manageable for large datasets)
-  nrows: 5000
+  nrows: 200000
 
   # ── Corpus columns ───────────────────────────────────────────────────────
   # Columns that are joined to build each BM25 document.

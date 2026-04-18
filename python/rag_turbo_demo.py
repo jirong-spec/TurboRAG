@@ -208,7 +208,7 @@ def load_or_generate_qa(df: "pd.DataFrame", cfg: dict) -> list[dict]:
 
 
 # ─────────────────────────────────────────────────────────────────── #
-# BM25                                                                 #
+# GPU-BM25: index stored as sparse CUDA tensor in VRAM               #
 # ─────────────────────────────────────────────────────────────────── #
 
 def _tokenize(text: str) -> list[str]:
@@ -220,41 +220,100 @@ def _tokenize(text: str) -> list[str]:
 
 
 class BM25:
-    def __init__(self, docs: list[str], k1: float = 1.5, b: float = 0.75) -> None:
-        self.docs = docs
-        self.k1, self.b = k1, b
-        self.N   = len(docs)
-        self.df: dict[str, int]     = defaultdict(int)
-        self.tf: list[Counter[str]] = []
-        self.dl: list[int]          = []
+    """BM25 index stored as a sparse CSR tensor in VRAM.
+
+    Build (CPU): tokenise → compute BM25 TF weights → upload sparse matrix.
+    Query (GPU): vectorise query → sparse matrix-vector multiply → top-k.
+
+    Memory: ~8 bytes × non-zeros.  For 200k docs × 50 unique terms ≈ 80 MB VRAM.
+    """
+
+    def __init__(self, docs: list[str], k1: float = 1.5, b: float = 0.75,
+                 device: str = DEVICE) -> None:
+        self.docs   = docs
+        self.N      = len(docs)
+        self.device = device
+
+        # ── Build vocabulary and raw TF on CPU ──────────────────────── #
+        vocab: dict[str, int] = {}
+        tokenized: list[list[str]] = []
         for doc in docs:
             toks = _tokenize(doc)
-            self.dl.append(len(toks))
-            c = Counter(toks)
-            self.tf.append(c)
-            for t in c:
-                self.df[t] += 1
-        self.avgdl = sum(self.dl) / max(self.N, 1)
+            tokenized.append(toks)
+            for t in toks:
+                if t not in vocab:
+                    vocab[t] = len(vocab)
+        self.vocab = vocab
+        V = len(vocab)
 
-    def _score(self, qtoks: list[str], idx: int) -> float:
-        tf, dl = self.tf[idx], self.dl[idx]
-        s = 0.0
-        for t in qtoks:
-            if t not in self.df:
-                continue
-            idf = math.log((self.N - self.df[t] + 0.5) / (self.df[t] + 0.5) + 1)
-            tfn = tf[t] * (self.k1 + 1) / (
-                tf[t] + self.k1 * (1 - self.b + self.b * dl / self.avgdl))
-            s += idf * tfn
-        return s
+        doc_rows, term_cols, tf_vals = [], [], []
+        df_cpu = [0] * V
+        dl = []
+
+        for d_idx, toks in enumerate(tokenized):
+            c = Counter(toks)
+            dl.append(len(toks))
+            for term, freq in c.items():
+                t_idx = vocab[term]
+                doc_rows.append(d_idx)
+                term_cols.append(t_idx)
+                tf_vals.append(float(freq))
+                df_cpu[t_idx] += 1
+
+        avgdl = sum(dl) / max(self.N, 1)
+        dl_t  = torch.tensor(dl, dtype=torch.float32)
+
+        # ── IDF ─────────────────────────────────────────────────────── #
+        df_t  = torch.tensor(df_cpu, dtype=torch.float32)
+        idf_t = torch.log((self.N - df_t + 0.5) / (df_t + 0.5) + 1.0)
+        self.idf = idf_t.to(device)   # [V]  — stays in VRAM
+
+        # ── BM25 TF weights (CPU, then upload) ──────────────────────── #
+        rows_t  = torch.tensor(doc_rows,  dtype=torch.long)
+        cols_t  = torch.tensor(term_cols, dtype=torch.long)
+        tf_t    = torch.tensor(tf_vals,   dtype=torch.float32)
+        dl_rows = dl_t[rows_t]
+
+        bm25_tf = tf_t * (k1 + 1.0) / (
+            tf_t + k1 * (1.0 - b + b * dl_rows / avgdl)
+        )
+
+        # Sparse COO → CSR, upload to VRAM
+        # Shape: [N_docs × V];  scores = matrix @ (q_vec ⊙ idf)
+        sparse_coo = torch.sparse_coo_tensor(
+            torch.stack([rows_t, cols_t]),
+            bm25_tf,
+            (self.N, V),
+            dtype=torch.float32,
+        ).coalesce()
+        self.matrix = sparse_coo.to_sparse_csr().to(device)  # VRAM
+
+        vram_mb = (bm25_tf.numel() * 4 + rows_t.numel() * 8) / 1024**2
+        print(f"GPU-BM25  : {self.N} docs, vocab {V:,}, "
+              f"nnz {bm25_tf.numel():,} (~{vram_mb:.0f} MB VRAM)")
 
     def retrieve(self, query: str, k: int = 5) -> list[tuple[int, float, str]]:
         qtoks = _tokenize(query)
-        scored = sorted(
-            ((i, self._score(qtoks, i)) for i in range(self.N)),
-            key=lambda x: -x[1],
-        )
-        return [(i, s, self.docs[i]) for i, s in scored[:k] if s > 0]
+        if not qtoks:
+            return []
+
+        # Query vector on GPU
+        q_vec = torch.zeros(len(self.vocab), dtype=torch.float32, device=self.device)
+        for t in qtoks:
+            idx = self.vocab.get(t)
+            if idx is not None:
+                q_vec[idx] += 1.0
+
+        # Scores = sparse_matrix @ (q_vec * idf)   shape: [N_docs]
+        scores = self.matrix @ (q_vec * self.idf)
+
+        k = min(k, self.N)
+        topk = torch.topk(scores, k)
+        return [
+            (idx.item(), topk.values[i].item(), self.docs[idx.item()])
+            for i, idx in enumerate(topk.indices)
+            if topk.values[i].item() > 0
+        ]
 
 
 # ─────────────────────────────────────────────────────────────────── #
