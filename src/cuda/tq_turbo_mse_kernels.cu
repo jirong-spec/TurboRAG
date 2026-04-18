@@ -15,8 +15,9 @@ __device__ __forceinline__ T clamp_val(T x, T lo, T hi) {
     return x < lo ? lo : (x > hi ? hi : x);
 }
 
-__device__ __forceinline__ float sign_flip(int idx) {
-    unsigned x = static_cast<unsigned>(idx) * 1103515245u + 12345u;
+__device__ __forceinline__ float sign_flip(int idx, int head_idx) {
+    unsigned x = (static_cast<unsigned>(head_idx) * 2654435761u)
+               ^ (static_cast<unsigned>(idx)      * 1103515245u + 12345u);
     return (x & 1u) ? 1.0f : -1.0f;
 }
 
@@ -68,7 +69,8 @@ __device__ void cooperative_forward_transform_and_quantize(
     half* scale_ptr,
     int D,
     float* smem_vec,
-    float* smem_red) {
+    float* smem_red,
+    int head_idx) {
 
     int tid = threadIdx.x;
     int pair_count = D / 2;
@@ -76,8 +78,8 @@ __device__ void cooperative_forward_transform_and_quantize(
     if (tid < pair_count) {
         int i0 = 2 * tid;
         int i1 = i0 + 1;
-        smem_vec[i0] = h2f(src[i0]) * sign_flip(i0);
-        smem_vec[i1] = h2f(src[i1]) * sign_flip(i1);
+        smem_vec[i0] = h2f(src[i0]) * sign_flip(i0, head_idx);
+        smem_vec[i1] = h2f(src[i1]) * sign_flip(i1, head_idx);
     }
     __syncthreads();
 
@@ -139,7 +141,8 @@ __device__ void cooperative_inverse_transform_and_store(
     const half* scale_ptr,
     half* dst,
     int D,
-    float* smem) {
+    float* smem,
+    int head_idx) {
 
     int tid = threadIdx.x;
     int pair_count = D / 2;
@@ -173,8 +176,8 @@ __device__ void cooperative_inverse_transform_and_store(
     if (tid < pair_count) {
         int i0 = 2 * tid;
         int i1 = i0 + 1;
-        float v0 = smem[i0] * inv_sqrt_d * sign_flip(i0);
-        float v1 = smem[i1] * inv_sqrt_d * sign_flip(i1);
+        float v0 = smem[i0] * inv_sqrt_d * sign_flip(i0, head_idx);
+        float v1 = smem[i1] * inv_sqrt_d * sign_flip(i1, head_idx);
         dst[i0] = f2h(v0);
         dst[i1] = f2h(v1);
     }
@@ -227,10 +230,10 @@ __global__ void turbo_mse_pack_kv_kernel(
     float* smem_red = smem + 2 * MAX_D;
 
     cooperative_forward_transform_and_quantize<MAX_D>(
-        key + base, k_codes, k_scale, D, smem_k, smem_red);
+        key + base, k_codes, k_scale, D, smem_k, smem_red, head_idx);
     __syncthreads();
     cooperative_forward_transform_and_quantize<MAX_D>(
-        value + base, v_codes, v_scale, D, smem_v, smem_red);
+        value + base, v_codes, v_scale, D, smem_v, smem_red, head_idx);
 }
 
 template<int MAX_D>
@@ -278,9 +281,9 @@ __global__ void turbo_mse_dequant_kv_kernel(
     float* smem_k = smem;
     float* smem_v = smem + MAX_D;
 
-    cooperative_inverse_transform_and_store<MAX_D>(k_codes, k_scale, out_key + base, D, smem_k);
+    cooperative_inverse_transform_and_store<MAX_D>(k_codes, k_scale, out_key + base, D, smem_k, head_idx);
     __syncthreads();
-    cooperative_inverse_transform_and_store<MAX_D>(v_codes, v_scale, out_value + base, D, smem_v);
+    cooperative_inverse_transform_and_store<MAX_D>(v_codes, v_scale, out_value + base, D, smem_v, head_idx);
 }
 
 // ---------------------------------------------------------------------------
@@ -294,7 +297,7 @@ __global__ void turbo_mse_dequant_kv_kernel(
 // The identity <qrot, krot> = <q, k> holds, so attention logits are computed
 // entirely in the rotated domain without materialising FP16 KV in global mem.
 //
-// Logit convention: <q, k>  (no 1/sqrt(D)), matching V6 / QJL convention.
+// Logit convention: <q, k> / sqrt(D)  (standard scaled dot-product attention).
 // ---------------------------------------------------------------------------
 template<int MAX_D>
 __global__ void turbo_mse_fused_attn_online_kernel(
@@ -331,7 +334,7 @@ __global__ void turbo_mse_fused_attn_online_kernel(
 
     // Rotate query: sign_flip + WHT + 1/sqrt(D)
     int qbase = (q_idx * cfg.num_kv_heads + head_idx) * D;
-    qrot[tid] = h2f(query[qbase + tid]) * sign_flip(tid);
+    qrot[tid] = h2f(query[qbase + tid]) * sign_flip(tid, head_idx);
     __syncthreads();
 
     hadamard_inplace<MAX_D>(qrot, D);
@@ -368,11 +371,11 @@ __global__ void turbo_mse_fused_attn_online_kernel(
             if (tid < stride) red[tid] += red[tid + stride];
             __syncthreads();
         }
-        // red[0] = logit = <qrot, krot>
+        // red[0] * inv_sqrt_d = logit = <qrot, krot> / sqrt(D)
 
         // ---- Online softmax update (thread 0) ------------------------------
         if (tid == 0) {
-            float logit = red[0];
+            float logit = red[0] * inv_sqrt_d;
             float m_new = fmaxf(sh_m, logit);
             sh_a = expf(sh_m - m_new);
             sh_b = expf(logit - m_new);
@@ -410,7 +413,7 @@ __global__ void turbo_mse_fused_attn_online_kernel(
     hadamard_inplace<MAX_D>(vaccum, D);
 
     int obase = (q_idx * cfg.num_kv_heads + head_idx) * D;
-    output[obase + tid] = f2h(vaccum[tid] * inv_sqrt_d * sign_flip(tid));
+    output[obase + tid] = f2h(vaccum[tid] * inv_sqrt_d * sign_flip(tid, head_idx));
 }
 
 } // namespace

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
+# Claude's version — data loaded dynamically from KaggleHub
 """TSMC RAG Demo — TurboQuant + Ollama vs Standard FP16 Ollama.
 
 Pipeline
 ────────
-1. Table-aware chunking of data/tsmc_report.txt
+1. Table-aware chunking of corpus fetched from KaggleHub
 2. BM25 retrieval of relevant chunks per question
 3. Ollama LLM inference (both paths share the same prompt/answer)
 4. TurboQuant KV-cache simulation on retrieved context tokens:
@@ -37,6 +38,13 @@ try:
 except ImportError:
     sys.exit("pip install requests")
 
+try:
+    import kagglehub
+    from kagglehub import KaggleDatasetAdapter
+    import pandas as pd
+except ImportError as _e:
+    sys.exit(f"pip install kagglehub pandas  ({_e})")
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from turboquant_wrapper import TurboQuantWrapper, TQConfig
 
@@ -44,8 +52,9 @@ from turboquant_wrapper import TurboQuantWrapper, TQConfig
 # Defaults (override with CLI flags)                                  #
 # ─────────────────────────────────────────────────────────────────── #
 
-DATA_PATH   = Path(__file__).resolve().parent.parent / "data" / "tsmc_report.txt"
-OLLAMA_URL  = "http://localhost:11434"
+KAGGLE_DATASET = "sanjarbek1/rag-dataset-with-gyg"
+KAGGLE_FILE    = "gyg_data_full.csv"
+OLLAMA_URL     = "http://localhost:11434"
 LLM_MODEL   = "qwen2.5:7b"       # Chinese-capable; fallback: llama3.2
 TOP_K       = 5                   # retrieved chunks per question
 BENCH_ITERS = 30                  # kernel timing iterations
@@ -203,13 +212,12 @@ def ollama_generate(prompt: str, model: str, timeout: int = 300) -> tuple[str, f
 
 def build_prompt(question: str, context: str) -> str:
     return (
-        "You are a financial analyst specialising in TSMC (Taiwan Semiconductor).\n"
-        "Answer using ONLY the context below. Include exact numbers. "
-        "Focus on 民國114年 (fiscal year 2025) data specifically. "
+        "You are a travel activity expert with deep knowledge of tours and experiences worldwide.\n"
+        "Answer using ONLY the context below. Be specific about activity names, locations, and details. "
         "Reply in English.\n\n"
         f"Context:\n{context}\n\n"
         f"Question: {question}\n"
-        "Answer (be specific with numbers):"
+        "Answer (be specific):"
     )
 
 
@@ -247,11 +255,12 @@ def _bench_fn(fn, warmup: int = 5, iters: int = BENCH_ITERS) -> float:
 
 
 def _fp16_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-    """Batched multi-head SDPA, logit = <q,k> (no scale) — matches TQ kernel."""
+    """Batched multi-head SDPA, logit = <q,k> / sqrt(D) — standard scaled dot-product."""
     qf = q.permute(1, 0, 2).float()          # [H, num_q, D]
     kf = k.permute(1, 0, 2).float()          # [H, num_kv, D]
     vf = v.permute(1, 0, 2).float()
-    out = torch.bmm(torch.softmax(torch.bmm(qf, kf.transpose(-2, -1)), dim=-1), vf)
+    scale = qf.shape[-1] ** -0.5
+    out = torch.bmm(torch.softmax(torch.bmm(qf, kf.transpose(-2, -1)) * scale, dim=-1), vf)
     return out.permute(1, 0, 2).to(torch.float16).contiguous()
 
 
@@ -341,34 +350,34 @@ def simulate_kv_cache(tq: TurboQuantWrapper, num_tokens: int) -> list[KVResult]:
 
 TEST_QUESTIONS = [
     {
-        "q":       "台積公司民國114年全年合併營收 3兆8090億 1224億美元 35.9%",
-        "display": "What was TSMC's total consolidated revenue in 2025?",
-        "keywords": ["8,090", "3兆", "1,224", "35.9"],
-        "expected": "NT$3,809.05B / USD$122.42B  (+35.9% YoY)",
+        "q":       "thermal spa wellness hot springs relaxation treatment water",
+        "display": "What thermal spa or hot spring experiences are available?",
+        "keywords": ["spa", "thermal", "hot spring", "wellness", "Caldea"],
+        "expected": "Thermal spa activities such as Caldea Spa in Andorra with lagoons, saunas, and hammam",
     },
     {
-        "q":       "台積公司民國114年稅後淨利 1兆7178億 552億美元 46.4%",
-        "display": "What was TSMC's net income (after-tax) in 2025?",
-        "keywords": ["7,178", "552", "46"],
-        "expected": "NT$1,717.88B / USD$55.21B  (+46.4% YoY)",
+        "q":       "guided city tour sightseeing historical walking",
+        "display": "What guided city tours or walking tours are available?",
+        "keywords": ["tour", "guided", "city", "walking", "historical"],
+        "expected": "Guided sightseeing or walking tours covering historical and cultural highlights",
     },
     {
-        "q":       "台積公司民國114年毛利率59.9% 營業利益率50.8% 純益率45.1%",
-        "display": "What was TSMC's gross margin and net margin in 2025?",
-        "keywords": ["59.9", "50.8", "45.1"],
-        "expected": "Gross 59.9%, Operating 50.8%, Net 45.1%",
+        "q":       "outdoor adventure nature hiking kayak water sports",
+        "display": "What outdoor adventure activities are offered?",
+        "keywords": ["outdoor", "adventure", "hiking", "kayak", "nature"],
+        "expected": "Outdoor activities including hiking, kayaking, or nature excursions",
     },
     {
-        "q":       "台積公司民國114年先進製程7奈米以下晶圓銷售74% 高於113年69%",
-        "display": "What % of wafer revenue came from advanced processes (≤7nm) in 2025?",
-        "keywords": ["74", "74%"],
-        "expected": "74% (up from 69% in 2024)",
+        "q":       "food tour cooking class local cuisine restaurant experience",
+        "display": "What food or culinary experiences are available?",
+        "keywords": ["food", "cooking", "cuisine", "dining", "tasting"],
+        "expected": "Culinary experiences such as food tours, cooking classes, or local dining",
     },
     {
-        "q":       "台積公司民國114年晶圓出貨量達1500萬片十二吋晶圓約當量 民國113年為1290萬片",
-        "display": "How many 12-inch equivalent wafers did TSMC ship in 2025?",
-        "keywords": ["1,500", "1500", "15,000,000", "15000000", "1,290"],
-        "expected": "15 million (1,500萬) 12-inch equivalent wafers",
+        "q":       "museum art gallery cultural heritage entrance ticket skip the line",
+        "display": "What museum or cultural attraction entrance tickets are available?",
+        "keywords": ["museum", "gallery", "ticket", "entrance", "cultural"],
+        "expected": "Entry tickets to museums, art galleries, or cultural heritage sites",
     },
 ]
 
@@ -442,13 +451,28 @@ def run(model: str, top_k: int, iters: int) -> None:
 
     print("# TSMC RAG Demo: TurboQuant + Ollama vs FP16 Baseline\n")
 
-    # ── Load document ────────────────────────────────────────────── #
-    if not DATA_PATH.exists():
-        sys.exit(f"Report not found: {DATA_PATH}")
-    text   = DATA_PATH.read_text(encoding="utf-8", errors="ignore")
+    # ── Load corpus from KaggleHub ───────────────────────────────── #
+    print(f"Fetching : {KAGGLE_DATASET} / {KAGGLE_FILE} …")
+    df = kagglehub.dataset_load(
+        KaggleDatasetAdapter.PANDAS,
+        KAGGLE_DATASET,
+        KAGGLE_FILE,
+        pandas_kwargs={"nrows": 5000},
+    )
+    text_col = next(
+        (c for c in ("description", "text", "contents", "passage", "content")
+         if c in df.columns),
+        df.select_dtypes(include="object").columns[0],
+    )
+    # Combine name + description for richer retrieval context
+    if "name" in df.columns:
+        corpus_series = (df["name"].fillna("") + ". " + df[text_col].fillna("")).str.strip()
+    else:
+        corpus_series = df[text_col].dropna().astype(str)
+    text   = "\n\n".join(corpus_series.tolist())
     chunks = chunk_document(text)
     bm25   = BM25(chunks)
-    print(f"Document : {DATA_PATH.name}  →  {len(chunks)} chunks\n")
+    print(f"Corpus   : {len(df)} rows  →  {len(chunks)} chunks  (column: '{text_col}')\n")
 
     # ── GPU check ────────────────────────────────────────────────── #
     if not torch.cuda.is_available():
@@ -560,7 +584,7 @@ def run(model: str, top_k: int, iters: int) -> None:
         f"\nConclusion: TurboProd achieves {prod_comp:.1f}× VRAM reduction "
         f"(K=3b+1b-residual / V=4b vs FP16 16b) with negligible attention-output MSE "
         f"({_avg(prod, 'attn_mse'):.2e}), confirming that quantised KV caches preserve "
-        "retrieval accuracy on TSMC financial data."
+        "retrieval quality on the GYG travel activities dataset."
     )
 
 

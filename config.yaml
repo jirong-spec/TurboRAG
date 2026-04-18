@@ -1,0 +1,62 @@
+# ─────────────────────────────────────────────────────────────────────────── #
+# TurboRAG — User configuration                                               #
+# Edit this file to point at your own dataset.                                #
+# ─────────────────────────────────────────────────────────────────────────── #
+
+dataset:
+  # ── Source ──────────────────────────────────────────────────────────────
+  # Use "kaggle" to fetch from KaggleHub, or "local" for a local CSV/TSV.
+  source: kaggle          # "kaggle" | "local"
+
+  # Kaggle dataset handle (only used when source = kaggle)
+  kaggle_handle: "sanjarbek1/rag-dataset-with-gyg"
+  kaggle_file:   "gyg_data_full.csv"
+
+  # Local CSV path (only used when source = local)
+  # local_path: "data/my_corpus.csv"
+
+  # How many rows to load (keeps memory manageable for large datasets)
+  nrows: 5000
+
+  # ── Corpus columns ───────────────────────────────────────────────────────
+  # Columns that are joined to build each BM25 document.
+  # The first column listed becomes the "title" prefix.
+  text_columns:
+    - name
+    - description
+
+qa:
+  # Path where auto-generated Q&A pairs are saved/cached.
+  path: "data/qa_pairs.jsonl"
+
+  # Auto-generate factual Q&A from structured columns.
+  # Set to false if you supply your own qa.path file instead.
+  auto_generate: true
+
+  # Name column used as the subject of generated questions.
+  name_column: "name"
+
+  # Which columns to turn into questions, and the question template.
+  # Use {name} as placeholder for the value of name_column.
+  templates:
+    city:     "In which city can you find the activity '{name}'?"
+    country:  "What country is the activity '{name}' located in?"
+    category: "What type of activity is '{name}'?"
+    rating:   "What is the customer rating of '{name}'?"
+
+retrieval:
+  top_k: 5   # chunks retrieved per question
+
+llm:
+  provider:    "ollama"                  # currently only "ollama" is supported
+  model:       "qwen2.5:7b"
+  ollama_url:  "http://localhost:11434"
+  timeout_sec: 120
+  sample_size: 50                        # number of questions sent to the LLM
+  system_prompt: >
+    You are a helpful assistant.
+    Answer using ONLY the context below. Be concise and specific.
+
+output:
+  dir:         "output"
+  report_stem: "rag_results"             # produces rag_results.md + rag_results.json

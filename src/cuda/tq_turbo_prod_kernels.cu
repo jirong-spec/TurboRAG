@@ -15,8 +15,9 @@ __device__ __forceinline__ T clamp_val(T x, T lo, T hi) {
     return x < lo ? lo : (x > hi ? hi : x);
 }
 
-__device__ __forceinline__ float sign_flip(int idx) {
-    unsigned x = static_cast<unsigned>(idx) * 1103515245u + 12345u;
+__device__ __forceinline__ float sign_flip(int idx, int head_idx) {
+    unsigned x = (static_cast<unsigned>(head_idx) * 2654435761u)
+               ^ (static_cast<unsigned>(idx)      * 1103515245u + 12345u);
     return (x & 1u) ? 1.0f : -1.0f;
 }
 
@@ -213,8 +214,8 @@ __global__ void turbo_prod_pack_kv_kernel(
     if (tid < layout.v4_bytes_per_token_head) v4_codes[tid] = 0;
     __syncthreads();
 
-    sk[tid] = h2f(key[base + tid]) * sign_flip(tid);
-    sv[tid] = h2f(value[base + tid]) * sign_flip(tid);
+    sk[tid] = h2f(key[base + tid]) * sign_flip(tid, head_idx);
+    sv[tid] = h2f(value[base + tid]) * sign_flip(tid, head_idx);
     __syncthreads();
 
     hadamard_inplace<MAX_D>(sk, D);
@@ -374,8 +375,8 @@ __global__ void turbo_prod_dequant_kv_kernel(
     float inv_sqrt_d = rsqrtf((float)D);
     int base = (token_idx * cfg.num_kv_heads + head_idx) * D;
 
-    out_key[base + tid] = f2h(sk[tid] * inv_sqrt_d * sign_flip(tid));
-    out_value[base + tid] = f2h(sv[tid] * inv_sqrt_d * sign_flip(tid));
+    out_key[base + tid] = f2h(sk[tid] * inv_sqrt_d * sign_flip(tid, head_idx));
+    out_value[base + tid] = f2h(sv[tid] * inv_sqrt_d * sign_flip(tid, head_idx));
 }
 
 template<int MAX_D>
@@ -414,7 +415,7 @@ __global__ void turbo_prod_fused_attention_logits_kernel(
     float* red = smem + 2 * MAX_D;
 
     int qbase = (q_idx * cfg.num_kv_heads + head_idx) * D;
-    qrot[tid] = h2f(query[qbase + tid]) * sign_flip(tid);
+    qrot[tid] = h2f(query[qbase + tid]) * sign_flip(tid, head_idx);
     __syncthreads();
 
     hadamard_inplace<MAX_D>(qrot, D);
@@ -465,7 +466,7 @@ __global__ void turbo_prod_fused_attention_logits_kernel(
             if (tid < stride) red[tid] += red[tid + stride];
             __syncthreads();
         }
-        float logit = logit_base + red[0] * res_ks;
+        float logit = (logit_base + red[0] * res_ks) * inv_sqrt_d;
 
         if (tid == 0) {
             logits[(q_idx * cfg.num_kv_heads + head_idx) * num_kv_tokens + kv_idx] = logit;
@@ -488,7 +489,7 @@ __global__ void turbo_prod_fused_attention_logits_kernel(
 //   Epilogue: normalise vaccum by 1/l, inverse Hadamard + sign-unflip.
 //
 // No logit_scratch global memory needed.
-// Logit convention: <q, k>  (no 1/sqrt(D)).
+// Logit convention: <q, k> / sqrt(D)  (standard scaled dot-product attention).
 // ---------------------------------------------------------------------------
 template<int MAX_D>
 __global__ void turbo_prod_fused_attn_online_kernel(
@@ -526,7 +527,7 @@ __global__ void turbo_prod_fused_attn_online_kernel(
 
     // Rotate query: sign_flip + WHT + 1/sqrt(D)
     int qbase = (q_idx * cfg.num_kv_heads + head_idx) * D;
-    qrot[tid] = h2f(query[qbase + tid]) * sign_flip(tid);
+    qrot[tid] = h2f(query[qbase + tid]) * sign_flip(tid, head_idx);
     __syncthreads();
 
     hadamard_inplace<MAX_D>(qrot, D);
@@ -585,7 +586,7 @@ __global__ void turbo_prod_fused_attn_online_kernel(
             __syncthreads();
         }
         // All threads now hold the same logit value
-        float logit = logit_base + red[0] * res_ks;
+        float logit = (logit_base + red[0] * res_ks) * inv_sqrt_d;
 
         // ---- Online softmax update (thread 0) ------------------------------
         if (tid == 0) {
@@ -625,7 +626,7 @@ __global__ void turbo_prod_fused_attn_online_kernel(
     hadamard_inplace<MAX_D>(vaccum, D);
 
     int obase = (q_idx * cfg.num_kv_heads + head_idx) * D;
-    output[obase + tid] = f2h(vaccum[tid] * inv_sqrt_d * sign_flip(tid));
+    output[obase + tid] = f2h(vaccum[tid] * inv_sqrt_d * sign_flip(tid, head_idx));
 }
 
 } // namespace

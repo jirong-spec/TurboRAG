@@ -49,13 +49,18 @@ tuboRAG/
 │       └── tq_attention_ref_kernel.cu    # Reference SDPA kernel
 ├── build/
 │   └── libturboquant.so          # Compiled shared library
+├── config.yaml                   # ← Edit this to use your own dataset
 ├── python/
 │   ├── turboquant_wrapper.py     # ctypes bindings — turbo_prod + turbo_mse
-│   ├── tsmc_rag_demo.py          # TSMC RAG: TurboQuant + Ollama vs FP16
+│   ├── rag_turbo_demo.py         # Config-driven RAG benchmark (bring your own data)
+│   ├── rag_demo.py               # GYG demo (KaggleHub, fixed dataset)
 │   ├── benchmark.py              # Latency / fidelity / memory sweep
 │   └── rag_turbo_comparison.py   # Synthetic RAG prefill + decode comparison
 ├── data/
-│   └── tsmc_report.txt           # TSMC 2025 annual report (source for RAG demo)
+│   └── qa_pairs.jsonl            # Auto-generated Q&A pairs (cached)
+├── output/
+│   ├── rag_results.md            # Benchmark report (Markdown)
+│   └── rag_results.json          # Benchmark report (JSON)
 ├── start_ollama_gpu.sh           # Ollama GPU startup helper
 └── README.md
 ```
@@ -72,6 +77,8 @@ tuboRAG/
 | Python | 3.10 |
 | PyTorch | 2.0 (CUDA build) |
 | requests | any |
+| kagglehub | 1.0+ |
+| pandas | 2.0+ |
 | Ollama | 0.21+ (for RAG demo) |
 
 Tested on **NVIDIA GeForce RTX 3060 (12 GB)**, CUDA 12.4, driver 550.163.
@@ -150,16 +157,111 @@ print(tq.summary())                                    # config + compression ra
 
 ---
 
-## TSMC RAG Demo
+## Bring Your Own Data — `rag_turbo_demo.py`
 
-`tsmc_rag_demo.py` runs an end-to-end comparison of **TurboQuant + Ollama** vs **standard FP16 Ollama** on TSMC's 2025 annual report.
+`rag_turbo_demo.py` is a **config-driven** RAG benchmark. Swap the dataset by editing `config.yaml` — no code changes needed.
+
+### Quick start
+
+```bash
+# 1. Edit config.yaml (see options below)
+# 2. Start Ollama on GPU
+bash start_ollama_gpu.sh &
+ollama pull qwen2.5:7b
+
+# 3. Set Kaggle credentials (if using a Kaggle dataset)
+export KAGGLE_USERNAME=your_username
+export KAGGLE_KEY=your_api_key
+
+# 4. Run
+cd python
+python3 rag_turbo_demo.py
+```
+
+### config.yaml — key options
+
+```yaml
+dataset:
+  source: kaggle          # "kaggle" | "local"
+  kaggle_handle: "owner/dataset-name"
+  kaggle_file:   "file.csv"
+  # local_path: "data/my_corpus.csv"   # alternative to Kaggle
+  nrows: 5000             # rows to load (keeps memory manageable)
+  text_columns:           # columns joined to build the BM25 corpus
+    - name
+    - description
+
+qa:
+  path: "data/qa_pairs.jsonl"   # cached Q&A file
+  auto_generate: true           # generate from structured columns
+  name_column: "name"           # subject of generated questions
+  templates:                    # one entry per answer column
+    city:     "In which city can you find '{name}'?"
+    country:  "What country is '{name}' located in?"
+
+retrieval:
+  top_k: 5
+
+llm:
+  model: "qwen2.5:7b"
+  sample_size: 50         # questions sent to the LLM (rest use BM25 only)
+  system_prompt: "You are a helpful assistant. Answer using ONLY the context."
+
+output:
+  dir: "output"
+  report_stem: "rag_results"   # → output/rag_results.md + .json
+```
+
+### Using a local CSV
+
+```yaml
+dataset:
+  source: local
+  local_path: "data/my_corpus.csv"   # relative to repo root, or absolute
+  nrows: 10000
+  text_columns:
+    - title
+    - body
+```
+
+### Using your own Q&A file
+
+Set `qa.auto_generate: false` and point `qa.path` at a JSONL file where each line is:
+
+```json
+{"question": "What is X?", "answer": "Y"}
+```
+
+### Output files
+
+| File | Contents |
+|---|---|
+| `output/rag_results.md` | Retrieval recall, LLM accuracy, KV efficiency table |
+| `output/rag_results.json` | Same data in JSON for downstream processing |
+| `data/qa_pairs.jsonl` | Auto-generated Q&A pairs (cached on first run) |
+
+### Results (RTX 3060, GYG dataset, qwen2.5:7b)
+
+| Metric | Value |
+|---|---|
+| BM25 retrieval recall (5 000 Q) | **48.1%** |
+| LLM answer accuracy (50-Q sample) | **22–26%** |
+| turbo_prod VRAM compression | **3.81×** |
+| turbo_mse VRAM compression | **3.86×** |
+| turbo_mse pack latency vs turbo_prod | **~40% faster** |
+
+---
+
+## RAG Demo
+
+`rag_demo.py` runs an end-to-end comparison of **TurboQuant + Ollama** vs **standard FP16 Ollama** on the [GYG travel activities dataset](https://www.kaggle.com/datasets/sanjarbek1/rag-dataset-with-gyg) fetched live from KaggleHub.
 
 ### Pipeline
 
 ```
-tsmc_report.txt
+KaggleHub: sanjarbek1/rag-dataset-with-gyg (gyg_data_full.csv, 5 000 rows)
       │
-      ▼ table-aware chunking (1 000 chunks)
+      ▼ table-aware chunking (~15 000 chunks)
       │
       ▼ BM25 retrieval (top-5 chunks per question)
       │
@@ -180,34 +282,43 @@ bash start_ollama_gpu.sh &
 ollama pull qwen2.5:7b
 ```
 
+### Kaggle credentials
+
+```bash
+export KAGGLE_USERNAME=<your_username>
+export KAGGLE_KEY=<your_api_key>
+```
+
+Get a key at **kaggle.com → Settings → API → Create New Token**.
+
 ### Run
 
 ```bash
 cd python
-python tsmc_rag_demo.py
-python tsmc_rag_demo.py --model qwen2.5:7b --top-k 5 --iters 50
+python3 rag_demo.py
+python3 rag_demo.py --model qwen2.5:7b --top-k 5 --iters 30
 ```
 
 ### Results (RTX 3060, qwen2.5:7b)
 
 #### Metric A — Answer Accuracy
 
-| Q | Question | Expected | Score | Latency |
-|---|---|---|---|---|
-| Q1 | Revenue 2025 | NT$3,809B / USD$122B (+35.9%) | **100%** | 1.5 s |
-| Q2 | Net income 2025 | NT$1,718B / USD$552B (+46.4%) | **67%** | 1.5 s |
-| Q3 | Gross / Op / Net margin | 59.9% / 50.8% / 45.1% | **100%** | 1.7 s |
-| Q4 | Advanced process (≤7 nm) % | 74% (↑ from 69% in 2024) | **100%** | 1.9 s |
-| Q5 | Wafer shipments 2025 | 15M 12″ eq. wafers | **40%** | 1.4 s |
-| **avg** | | | **81%** | **1.6 s** |
+| Q | Question | Score | Latency |
+|---|---|---|---|
+| Q1 | What thermal spa or hot spring experiences are available? | **60%** | 9.1 s |
+| Q2 | What guided city tours or walking tours are available? | **100%** | 3.7 s |
+| Q3 | What outdoor adventure activities are offered? | **60%** | 3.4 s |
+| Q4 | What food or culinary experiences are available? | **60%** | 3.6 s |
+| Q5 | What museum or cultural attraction entrance tickets are available? | **40%** | 4.5 s |
+| **avg** | | **64%** | **4.9 s** |
 
 #### Metric B — KV-Cache Efficiency
 
 | Scheme | Tokens | FP16 MB | Quant MB | Compression | Pack µs | KV MSE | Attn MSE |
 |---|---|---|---|---|---|---|---|
-| turbo_prod | ~530 | 2.07 | 0.54 | **3.8×** | 119 | 1.07e-02 | 5.2e-02 |
-| turbo_mse | ~530 | 2.07 | 0.53 | **3.9×** | **72** | **9.3e-03** | 6.8e-02 |
-| FP16 | ~530 | 2.07 | 2.07 | 1× | — | 0 | 0 |
+| turbo_prod | ~689 | 2.69 | 0.70 | **3.8×** | 150 | 1.07e-02 | 1.54e-01 |
+| turbo_mse | ~689 | 2.69 | 0.69 | **3.8×** | **91** | **9.3e-03** | 8.3e-02 |
+| FP16 | ~689 | 2.69 | 2.69 | 1× | — | 0 | 0 |
 
 > turbo_mse packs **40% faster** than turbo_prod and achieves lower KV reconstruction error.  
 > turbo_prod reaches **3.8× VRAM reduction** with fused no-spill attention.
@@ -249,7 +360,7 @@ MSE is constant across all sequence lengths — quantization error does not accu
 
 ## Design Notes
 
-**Logit convention.** All kernels use `logit = ⟨q, k⟩` (no `1/√D` scaling). The reference FP16 attention in `rag_turbo_comparison.py` and `tsmc_rag_demo.py` matches this convention so MSE comparisons are apples-to-apples.
+**Logit convention.** All kernels use `logit = ⟨q, k⟩ / √D` (standard scaled dot-product attention). The reference FP16 attention in `rag_turbo_comparison.py` and `rag_demo.py` matches this convention so MSE comparisons are apples-to-apples.
 
 **Paged allocation.** `TQAllocator` manages a GPU page pool of `block_size=16` token slots. `TQBlockTable` maps sequence IDs to slot lists, enabling dynamic KV eviction and multi-sequence batching.
 
