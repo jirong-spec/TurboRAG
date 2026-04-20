@@ -43,31 +43,47 @@ For a 1143-token document on Qwen2.5-3B: prefill takes 244 ms; CAG loads KV in ~
 
 Hardware: **NVIDIA GeForce RTX 3060 12 GB**, CUDA 12.4
 
-### LongBench / qasper (20 samples, avg 5 926 context tokens)
+### LongBench / gov\_report — 32K context (99 samples, all padded to 32 768 tokens)
 
-Dataset: [THUDM/LongBench](https://huggingface.co/datasets/THUDM/LongBench) `qasper` test split — single-doc QA on scientific papers.  
-TTFT = disk\_load(all 36 layers) + query\_prefill. F1 = token-level F1 vs ground truth.
+Dataset: [THUDM/LongBench](https://huggingface.co/datasets/THUDM/LongBench) `gov_report` test split — long government-report summarisation.  
+Each sample is padded to exactly **32 768 tokens** by concatenating neighbouring documents.  
+TTFT = disk\_load(36 layers) + query\_prefill. Normal-RAG prefill at 32K tokens is ~5–6 s and near-OOM; CAG eliminates it entirely.
+
+| Scheme     | CAG TTFT (avg) | p50      | p95      | KV VRAM    | VRAM×    |
+|------------|---------------|----------|----------|------------|----------|
+| fp16 CAG   | 1 538.7 ms    | 1 538 ms | 1 550 ms | **1 152 MB** | 1.0×   |
+| turbo\_prod | **1 102.8 ms** | 1 110 ms | 1 133 ms | 302 MB    | **3.8×** |
+| turbo\_mse  | 1 137.2 ms    | 1 148 ms | 1 168 ms | 324 MB    | **3.6×** |
+| polar      | **1 098.5 ms** | 1 101 ms | 1 121 ms | **297 MB** | **3.9×** |
+
+Key takeaways at 32K context:
+- **TTFT gap: 440 ms** (fp16 → polar), 29% faster decode start
+- **VRAM gap: 3.9×** — polar saves ~855 MB per inference vs fp16 KV
+- 1 doc skipped (OOM during 32K forward-pass precompute); 99/100 succeeded
+
+### LongBench / qasper — short context (20 samples, avg 5 926 context tokens)
+
+Dataset: `qasper` test split — single-doc QA on scientific papers.  
+TTFT = disk\_load(36 layers) + query\_prefill. F1 = token-level F1 vs ground truth.
 
 | Scheme     | Normal RAG  | CAG TTFT  | Speedup  | KV VRAM   | VRAM×    | F1    |
 |------------|-------------|-----------|----------|-----------|----------|-------|
-| fp16 CAG   | 1049 ms     | 194.9 ms  | **5.4×** | 208.3 MB  | 1.0×     | 0.199 |
-| turbo\_prod | 1049 ms     | 161.4 ms  | **6.5×** | 54.6 MB   | **3.8×** | 0.208 |
-| turbo\_mse  | 1049 ms     | 162.2 ms  | **6.5×** | 58.7 MB   | **3.6×** | 0.231 |
-| polar      | 1049 ms     | 159.7 ms  | **6.6×** | 53.8 MB   | **3.9×** | 0.231 |
+| fp16 CAG   | 1 049 ms    | 194.9 ms  | **5.4×** | 208 MB    | 1.0×     | 0.199 |
+| turbo\_prod | 1 049 ms    | 161.4 ms  | **6.5×** | 54.6 MB   | **3.8×** | 0.208 |
+| turbo\_mse  | 1 049 ms    | 162.2 ms  | **6.5×** | 58.7 MB   | **3.6×** | 0.231 |
+| polar      | 1 049 ms    | 159.7 ms  | **6.6×** | 53.8 MB   | **3.9×** | 0.231 |
 
-F1 scores are low across all schemes — LongBench/qasper is a hard extractive QA task even for fp16; the relative ordering (turbo\_mse ≈ polar > turbo\_prod ≈ fp16) shows compressed KV preserves answer quality.
+### TTFT Scaling — Sim Mode (Qwen2.5-3B scale, 1 143 tokens, 36 layers)
 
-### TTFT Scaling — Sim Mode (Qwen2.5-3B scale, 1143 tokens, 36 layers)
-
-| Scheme     | TTFT     | Speedup vs FP16 prefill | VRAM×    |
-|------------|----------|-------------------------|----------|
-| FP16       | 129.2ms  | 1.0×                    | 1.0×     |
-| turbo\_prod | 3.4ms   | **37.9×**               | 3.6×     |
-| turbo\_mse  | 3.5ms   | **36.9×**               | 3.2×     |
-| polar      | 2.7ms   | **47.8×**               | **3.7×** |
+| Scheme     | TTFT    | Speedup vs FP16 prefill | VRAM×    |
+|------------|---------|-------------------------|----------|
+| FP16       | 129.2 ms | 1.0×                   | 1.0×     |
+| turbo\_prod | 3.4 ms  | **37.9×**               | 3.6×     |
+| turbo\_mse  | 3.5 ms  | **36.9×**               | 3.2×     |
+| polar      | 2.7 ms  | **47.8×**               | **3.7×** |
 
 > Sim mode measures pure GPU disk-load latency vs FP16 prefill (no model weights needed).  
-> Full-inference speedup is lower because query prefill (~29 ms) is shared across all schemes.
+> Full-inference speedup is lower because query prefill is shared across all schemes.
 
 ---
 

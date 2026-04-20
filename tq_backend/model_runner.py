@@ -82,7 +82,7 @@ class TQModelRunner:
         schemes: list[Scheme] | None = None,
         overwrite: bool = False,
         max_length: int | None = None,
-    ) -> None:
+    ) -> set[str]:
         """Extract and compress KV for each document for all schemes.
 
         Args:
@@ -90,9 +90,15 @@ class TQModelRunner:
                         before the forward pass.  Useful for long-context
                         benchmarks (e.g. LongBench at 32K tokens) to avoid
                         exceeding the model's context window.
+
+        Returns:
+            Set of doc_ids that failed due to CUDA OOM (forward pass too long).
+            Callers should skip these docs in downstream evaluation.
         """
         if schemes is None:
             schemes = ["fp16", "turbo_prod", "turbo_mse", "polar"]
+
+        failed: set[str] = set()
 
         for doc_id, text in corpus.items():
             skip = all(
@@ -105,13 +111,25 @@ class TQModelRunner:
                 continue
 
             print(f"  [pack] {doc_id}  ({len(text)} chars) ...", end=" ", flush=True)
-            kv_per_layer = self._extract_kv(text, max_length=max_length)
+            try:
+                kv_per_layer = self._extract_kv(text, max_length=max_length)
+            except Exception as exc:
+                msg = str(exc).lower()
+                if "out of memory" in msg or "cuda" in msg:
+                    print(f"OOM — skipped")
+                    failed.add(doc_id)
+                    torch.cuda.empty_cache()
+                    continue
+                raise  # re-raise non-OOM errors
+
             total_bytes = 0
             for layer_idx, (k, v) in enumerate(kv_per_layer):
                 for scheme in schemes:
                     b = self.store.pack_document(doc_id, layer_idx, k, v, scheme, overwrite)
                     total_bytes += b
             print(f"done  ({total_bytes / 1024:.1f} KB across {len(schemes)} schemes)")
+
+        return failed
 
     def _extract_kv(
         self,

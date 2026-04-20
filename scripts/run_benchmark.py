@@ -49,26 +49,38 @@ def main() -> None:
     # ── longbench mode ────────────────────────────────────────────── #
     ap.add_argument(
         "--dataset",
-        default="qasper",
+        default="gov_report",
         help=(
             "Comma-separated list of LongBench subsets to run.\n"
-            "  qasper     single-doc QA on scientific papers (~12K tok)\n"
-            "  2wikimqa   multi-hop QA                       (~5K tok)\n"
-            "  gov_report long-document summarization        (~8K tok)\n"
-            "Example: --dataset qasper,2wikimqa"
+            "  gov_report long-document summarization (~8K tok, up to 20K+)\n"
+            "  qasper     single-doc QA on papers     (~12K tok)\n"
+            "  2wikimqa   multi-hop QA                (~5K tok)\n"
+            "Example: --dataset gov_report,qasper"
         ),
     )
     ap.add_argument(
-        "--max-samples", type=int, default=20,
-        help="Number of LongBench test items to evaluate (default: 20)",
+        "--max-samples", type=int, default=100,
+        help="Number of LongBench test items to evaluate (default: 100)",
     )
     ap.add_argument(
         "--max-length", type=int, default=32768,
-        help="Context truncation in tokens (Qwen2.5-3B limit: 32768)",
+        help="Hard context cap in tokens (Qwen2.5-3B limit: 32768)",
+    )
+    ap.add_argument(
+        "--pad-to-length", type=int, default=None,
+        help=(
+            "Pad every context to exactly this many tokens by appending "
+            "content from other samples (default: same as --max-length). "
+            "Ensures uniform VRAM usage for fair comparison."
+        ),
     )
     ap.add_argument(
         "--ttft-only", action="store_true",
         help="Skip answer generation; measure TTFT + VRAM only (no F1)",
+    )
+    ap.add_argument(
+        "--verbose", action="store_true",
+        help="Print every sample's per-scheme result (default: every ~10%%)",
     )
     # Note: --model, --store, --schemes, --new-tokens, --lib are shared with full mode
 
@@ -110,8 +122,10 @@ def main() -> None:
                 schemes=args.schemes.split(","),
                 max_samples=args.max_samples,
                 max_length=args.max_length,
+                pad_to_length=args.pad_to_length,
                 max_new_tokens=args.new_tokens,
                 ttft_only=args.ttft_only,
+                verbose=args.verbose,
                 lib_path=args.lib,
             )
 
