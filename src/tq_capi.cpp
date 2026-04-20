@@ -1,8 +1,6 @@
 #include "tq_turbo_prod.cuh"
 #include "tq_turbo_mse_layout.h"
 #include "tq_turbo_mse_kernels.cuh"
-#include "tq_polar_layout.h"
-#include "tq_polar.cuh"
 #include "tq_cuda_check.h"
 #include <cstdio>
 #include <cstring>
@@ -174,61 +172,3 @@ extern "C" int tq_launch_turbo_mse_fused_attention_output(
     return 0;
 }
 
-// ── polar ──────────────────────────────────────────────────────────────── //
-
-extern "C" int tq_make_polar_layout(
-    const TQConfig* cfg,
-    TQPolarPageLayout* out_layout) {
-    if (!cfg || !out_layout) return -1;
-    *out_layout = make_tq_polar_page_layout(*cfg);
-    return 0;
-}
-
-extern "C" int tq_launch_polar_pack_kv(
-    const half* key,
-    const half* value,
-    const int32_t* slot_mapping,
-    uint8_t* page_pool,
-    const TQPolarPageLayout* layout,
-    const TQConfig* cfg,
-    int num_tokens,
-    cudaStream_t stream) {
-    if (!key || !value || !slot_mapping || !page_pool || !layout || !cfg) return -1;
-    TQ_KERNEL_CALL(launch_tq_polar_pack_kv(
-        key, value, slot_mapping, page_pool,
-        *layout, *cfg, num_tokens, stream));
-    return 0;
-}
-
-extern "C" int tq_launch_polar_dequant_kv(
-    const uint8_t* page_pool,
-    const int32_t* slot_mapping,
-    half* out_key,
-    half* out_value,
-    const TQPolarPageLayout* layout,
-    const TQConfig* cfg,
-    int num_tokens,
-    cudaStream_t stream) {
-    if (!page_pool || !slot_mapping || !out_key || !out_value || !layout || !cfg) return -1;
-    TQ_KERNEL_CALL(launch_tq_polar_dequant_kv(
-        page_pool, slot_mapping, out_key, out_value,
-        *layout, *cfg, num_tokens, stream));
-    return 0;
-}
-
-extern "C" int tq_launch_polar_fused_attention_output(
-    const half* query,
-    const uint8_t* page_pool,
-    const int32_t* slot_mapping,
-    half* output,
-    const TQPolarPageLayout* layout,
-    const TQConfig* cfg,
-    int num_queries,
-    int num_kv_tokens,
-    cudaStream_t stream) {
-    if (!query || !page_pool || !slot_mapping || !output || !layout || !cfg) return -1;
-    TQ_KERNEL_CALL(launch_tq_polar_fused_attention_output(
-        query, page_pool, slot_mapping, output,
-        *layout, *cfg, num_queries, num_kv_tokens, stream));
-    return 0;
-}

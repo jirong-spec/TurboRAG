@@ -42,7 +42,7 @@ def main() -> None:
     ap.add_argument("--store",      default="./kv_store")
     ap.add_argument("--corpus",     default=None)
     ap.add_argument("--queries",    default=None)
-    ap.add_argument("--schemes",    default="fp16,turbo_prod,turbo_mse,polar")
+    ap.add_argument("--schemes",    default="fp16,turbo_prod,turbo_mse")
     ap.add_argument("--new-tokens", type=int, default=64)
     ap.add_argument("--lib",        default=None)
 

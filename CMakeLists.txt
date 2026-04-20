@@ -11,7 +11,6 @@ set(CMAKE_CUDA_ARCHITECTURES 80)
 add_library(turboquant SHARED
     src/tq_turbo_prod.cpp
     src/tq_block_table.cpp
-    src/tq_polar_layout.cpp
     src/tq_dense_layout.cpp
     src/tq_layout.cpp
     src/tq_turbo_mse_layout.cpp
@@ -27,7 +26,6 @@ add_library(turboquant SHARED
     src/cuda/tq_turbo_mse_kernels.cu
     src/cuda/tq_attention_ref_kernel.cu
     src/cuda/tq_turbo_prod_kernels.cu
-    src/cuda/tq_polar_kernels.cu
     src/tq_capi.cpp
 )
 

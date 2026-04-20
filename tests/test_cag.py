@@ -75,11 +75,11 @@ def test_doc_hash_is_full_sha256(tmp_path):
 def test_filename_key_uses_sha256_prefix(tmp_path):
     store = _make_store(tmp_path)
     doc_id = "corpus/chunk_007"
-    key = store._key(doc_id, layer=3, scheme="polar")
+    key = store._key(doc_id, layer=3, scheme="turbo_mse")
     prefix = hashlib.sha256(doc_id.encode()).hexdigest()[:16]
     assert key.startswith(prefix), f"key={key!r} should start with sha256[:16]={prefix!r}"
     assert "L03" in key
-    assert "polar" in key
+    assert "turbo_mse" in key
 
 
 def test_filename_key_longer_than_old_md5(tmp_path):
@@ -207,19 +207,17 @@ def test_build_dynamic_cache_calls_update(tmp_path):
     assert doc_len == 4
 
 
-# ── 7. GPU pack/dequant roundtrip (all 3 schemes) ─────────────────────────── #
+# ── 7. GPU pack/dequant roundtrip ─────────────────────────────────────────── #
 
-# Relative MSE tolerance per scheme (lossy compression; polar is tightest).
 _ROUNDTRIP_MSE_TOL = {
-    "turbo_prod": 0.35,  # 3-bit K + 1-bit residual + 4-bit V
-    "turbo_mse":  0.25,  # INT4 MSE-optimal
-    "polar":      0.25,  # 2-bit K + 3-bit V, Hadamard-rotated
+    "turbo_prod": 0.35,
+    "turbo_mse":  0.25,
 }
 
 
 @_needs_lib
 @_needs_cuda
-@pytest.mark.parametrize("scheme", ["turbo_prod", "turbo_mse", "polar"])
+@pytest.mark.parametrize("scheme", ["turbo_prod", "turbo_mse"])
 def test_roundtrip_smoke(tmp_path, scheme):
     """Pack→dequant roundtrip must preserve shape/dtype; relative MSE within tolerance."""
     from tq_backend.cag_store import CAGStore
@@ -266,14 +264,14 @@ def test_migrate_store_dry_run(tmp_path):
     new_pfx = hashlib.sha256(doc_id.encode()).hexdigest()[:16]
 
     # Create fake old-format files
-    (tmp_path / f"{old_pfx}_L00_polar.bin").write_bytes(b"\x00" * 16)
-    (tmp_path / f"{old_pfx}_L00_polar.meta").write_bytes(b"")
+    (tmp_path / f"{old_pfx}_L00_turbo_mse.bin").write_bytes(b"\x00" * 16)
+    (tmp_path / f"{old_pfx}_L00_turbo_mse.meta").write_bytes(b"")
 
     migrate_store(tmp_path, [doc_id], dry_run=True)
 
     # Dry run: old files must still exist, new files must not
-    assert (tmp_path / f"{old_pfx}_L00_polar.bin").exists(), "old .bin removed in dry run"
-    assert not (tmp_path / f"{new_pfx}_L00_polar.bin").exists(), "new .bin created in dry run"
+    assert (tmp_path / f"{old_pfx}_L00_turbo_mse.bin").exists(), "old .bin removed in dry run"
+    assert not (tmp_path / f"{new_pfx}_L00_turbo_mse.bin").exists(), "new .bin created in dry run"
     assert not (tmp_path / "manifest.json").exists(), "manifest created in dry run"
 
 
@@ -287,16 +285,16 @@ def test_migrate_store_live(tmp_path):
     new_pfx = hashlib.sha256(doc_id.encode()).hexdigest()[:16]
     full_hash = hashlib.sha256(doc_id.encode()).hexdigest()
 
-    (tmp_path / f"{old_pfx}_L00_polar.bin").write_bytes(b"\x00" * 16)
-    (tmp_path / f"{old_pfx}_L00_polar.meta").write_bytes(b"")
+    (tmp_path / f"{old_pfx}_L00_turbo_mse.bin").write_bytes(b"\x00" * 16)
+    (tmp_path / f"{old_pfx}_L00_turbo_mse.meta").write_bytes(b"")
 
     migrate_store(tmp_path, [doc_id], dry_run=False)
 
-    assert not (tmp_path / f"{old_pfx}_L00_polar.bin").exists(), "old .bin still exists"
-    assert (tmp_path / f"{new_pfx}_L00_polar.bin").exists(), "new .bin not created"
+    assert not (tmp_path / f"{old_pfx}_L00_turbo_mse.bin").exists(), "old .bin still exists"
+    assert (tmp_path / f"{new_pfx}_L00_turbo_mse.bin").exists(), "new .bin not created"
 
     manifest = json.loads((tmp_path / "manifest.json").read_text())
     assert doc_id in manifest["entries"]
     entry = manifest["entries"][doc_id]
     assert entry["sha256"] == full_hash
-    assert "0::polar" in entry["layers"]
+    assert "0::turbo_mse" in entry["layers"]

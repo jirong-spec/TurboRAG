@@ -17,7 +17,7 @@ from .turboquant_wrapper import TurboQuantWrapper, TQConfig
 
 _MANIFEST_FILE = "manifest.json"
 
-Scheme = Literal["fp16", "turbo_prod", "turbo_mse", "polar"]
+Scheme = Literal["fp16", "turbo_prod", "turbo_mse"]
 
 
 class CAGStore:
@@ -116,7 +116,7 @@ class CAGStore:
         layer: int,
         key: torch.Tensor,    # [N, H, D] fp16 CUDA
         value: torch.Tensor,  # [N, H, D] fp16 CUDA
-        scheme: Scheme = "polar",
+        scheme: Scheme = "turbo_prod",
         overwrite: bool = False,
     ) -> int:
         """Compress and save one layer's KV. Returns bytes written."""
@@ -145,10 +145,6 @@ class CAGStore:
             layout = self.tq.make_mse_layout_for(cfg)
             pool = self.tq.alloc_mse_pool(N, layout, cfg)
             self.tq.mse_pack(key, value, slots, pool, layout, cfg)
-        elif scheme == "polar":
-            layout = self.tq.make_polar_layout_for(cfg)
-            pool = self.tq.alloc_polar_pool(N, layout, cfg)
-            self.tq.polar_pack(key, value, slots, pool, layout, cfg)
         else:
             raise ValueError(f"Unknown scheme: {scheme}")
 
@@ -166,7 +162,7 @@ class CAGStore:
         self,
         doc_id: str,
         layer: int,
-        scheme: Scheme = "polar",
+        scheme: Scheme = "turbo_prod",
         head_shape: tuple[int, int] = (2, 64),  # (num_kv_heads, head_dim)
     ) -> tuple[torch.Tensor, torch.Tensor, int]:
         """Load compressed KV to CUDA. Returns (pool_or_kv, slots, num_tokens)."""
@@ -196,9 +192,6 @@ class CAGStore:
         elif scheme == "turbo_mse":
             layout = self.tq.make_mse_layout_for(cfg)
             pool_bytes = self.tq.mse_bytes(N, layout, cfg)
-        elif scheme == "polar":
-            layout = self.tq.make_polar_layout_for(cfg)
-            pool_bytes = self.tq.polar_bytes(N, layout, cfg)
         else:
             raise ValueError(f"Unknown scheme: {scheme}")
 
@@ -232,9 +225,6 @@ class CAGStore:
         elif scheme == "turbo_mse":
             layout = self.tq.make_mse_layout_for(cfg)
             self.tq.mse_dequant(pool, slots, out_key, out_value, layout, cfg)
-        elif scheme == "polar":
-            layout = self.tq.make_polar_layout_for(cfg)
-            self.tq.polar_dequant(pool, slots, out_key, out_value, layout, cfg)
         return out_key, out_value
 
     def build_dynamic_cache(
@@ -295,10 +285,6 @@ class CAGStore:
         elif scheme == "turbo_mse":
             layout = self.tq.make_mse_layout_for(cfg)
             self.tq.mse_fused_attn_output(query, pool, slots, output, layout, cfg, 1, N)
-        elif scheme == "polar":
-            layout = self.tq.make_polar_layout_for(cfg)
-            self.tq.polar_fused_attn_output(query, pool, slots, output, layout, cfg, 1, N)
-
         return output
 
     # ── cfg helpers ───────────────────────────────────────────────── #
@@ -324,6 +310,4 @@ class CAGStore:
             return self.tq.quant_bytes(num_tokens, self.tq.make_layout_for(cfg), cfg)
         elif scheme == "turbo_mse":
             return self.tq.mse_bytes(num_tokens, self.tq.make_mse_layout_for(cfg), cfg)
-        elif scheme == "polar":
-            return self.tq.polar_bytes(num_tokens, self.tq.make_polar_layout_for(cfg), cfg)
         return 0

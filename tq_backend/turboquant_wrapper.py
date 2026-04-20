@@ -63,31 +63,16 @@ class TQTurbomsePageLayout(ctypes.Structure):
     ]
 
 
-class TQPolarPageLayout(ctypes.Structure):
-    """Matches tq_polar_layout.h :: TQPolarPageLayout."""
-    _fields_ = [
-        ("page_size_bytes",           c_size_t),
-        ("k4_codes_offset",           c_size_t),
-        ("k_scales_offset",           c_size_t),
-        ("v4_codes_offset",           c_size_t),
-        ("v_scales_offset",           c_size_t),
-        ("k4_bytes_per_token_head",   c_int),
-        ("v4_bytes_per_token_head",   c_int),
-        ("scale_bytes_per_token_head", c_int),
-    ]
-
 
 # ─────────────────────────────────────────────────────────────────── #
 # Wrapper                                                             #
 # ─────────────────────────────────────────────────────────────────── #
 
 class TurboQuantWrapper:
-    """Thin wrapper around libturboquant.so exposing turbo_prod and turbo_mse.
+    """Thin wrapper around libturboquant.so.
 
-    turbo_prod  — K=3-bit Lloyd-Max + 1-bit QJL residual, V=4-bit.
-                  Optimised for maximum throughput and compression (~15–16×).
-    turbo_mse   — INT4, loss function minimises mean-squared error.
-                  Optimised for reconstruction fidelity (~8×).
+    turbo_prod — K=3-bit Lloyd-Max + 1-bit QJL residual, V=4-bit  (~3.8× VRAM reduction)
+    turbo_mse  — INT4 MSE-optimal                                  (~3.6× VRAM reduction)
     """
 
     def __init__(self, lib_path: str | Path | None = None) -> None:
@@ -183,41 +168,8 @@ class TurboQuantWrapper:
         ]
         L.tq_launch_turbo_mse_fused_attention_output.restype = c_int
 
-        # tq_last_error(): returns the CUDA error string from the last failed polar call
         L.tq_last_error.argtypes = []
         L.tq_last_error.restype  = ctypes.c_char_p
-
-        # ── polar kernels ────────────────────────────────────────── #
-        L.tq_make_polar_layout.argtypes = [
-            ctypes.POINTER(TQConfig),
-            ctypes.POINTER(TQPolarPageLayout),
-        ]
-        L.tq_make_polar_layout.restype = c_int
-
-        L.tq_launch_polar_pack_kv.argtypes = [
-            c_void_p, c_void_p,
-            ctypes.POINTER(c_int32), ctypes.POINTER(c_uint8),
-            ctypes.POINTER(TQPolarPageLayout), ctypes.POINTER(TQConfig),
-            c_int, c_void_p,
-        ]
-        L.tq_launch_polar_pack_kv.restype = c_int
-
-        L.tq_launch_polar_dequant_kv.argtypes = [
-            ctypes.POINTER(c_uint8), ctypes.POINTER(c_int32),
-            c_void_p, c_void_p,
-            ctypes.POINTER(TQPolarPageLayout), ctypes.POINTER(TQConfig),
-            c_int, c_void_p,
-        ]
-        L.tq_launch_polar_dequant_kv.restype = c_int
-
-        L.tq_launch_polar_fused_attention_output.argtypes = [
-            c_void_p,
-            ctypes.POINTER(c_uint8), ctypes.POINTER(c_int32),
-            c_void_p,
-            ctypes.POINTER(TQPolarPageLayout), ctypes.POINTER(TQConfig),
-            c_int, c_int, c_void_p,
-        ]
-        L.tq_launch_polar_fused_attention_output.restype = c_int
 
     # ── CUDA error helpers ────────────────────────────────────────── #
 
@@ -253,12 +205,6 @@ class TurboQuantWrapper:
         layout = TQTurbomsePageLayout()
         if self._lib.tq_make_turbo_mse_layout(ctypes.byref(cfg), ctypes.byref(layout)) != 0:
             raise RuntimeError("tq_make_turbo_mse_layout failed")
-        return layout
-
-    def make_polar_layout_for(self, cfg: TQConfig) -> TQPolarPageLayout:
-        layout = TQPolarPageLayout()
-        if self._lib.tq_make_polar_layout(ctypes.byref(cfg), ctypes.byref(layout)) != 0:
-            raise RuntimeError("tq_make_polar_layout failed")
         return layout
 
     # ── Pointer helpers ───────────────────────────────────────────── #
@@ -432,71 +378,6 @@ class TurboQuantWrapper:
             self._kernel_raise(rc, "turbo_mse", "fused_attn_output")
 
     # ─────────────────────────────────────────────────────────────── #
-    # polar — K=2-bit + V=3-bit Hadamard-rotated  (~6.1× vs FP16)   #
-    # ─────────────────────────────────────────────────────────────── #
-
-    def polar_pack(
-        self,
-        key:          torch.Tensor,
-        value:        torch.Tensor,
-        slot_mapping: torch.Tensor,
-        page_pool:    torch.Tensor,
-        layout:       TQPolarPageLayout,
-        cfg:          TQConfig,
-        stream:       int = 0,
-    ) -> None:
-        rc = self._lib.tq_launch_polar_pack_kv(
-            self._vp(key), self._vp(value),
-            self._i32p(slot_mapping), self._u8p(page_pool),
-            ctypes.byref(layout), ctypes.byref(cfg),
-            key.shape[0], c_void_p(stream),
-        )
-        if rc != 0:
-            self._kernel_raise(rc, "polar", "pack_kv")
-
-    def polar_dequant(
-        self,
-        page_pool:    torch.Tensor,
-        slot_mapping: torch.Tensor,
-        out_key:      torch.Tensor,
-        out_value:    torch.Tensor,
-        layout:       TQPolarPageLayout,
-        cfg:          TQConfig,
-        stream:       int = 0,
-    ) -> None:
-        rc = self._lib.tq_launch_polar_dequant_kv(
-            self._u8p(page_pool), self._i32p(slot_mapping),
-            self._vp(out_key), self._vp(out_value),
-            ctypes.byref(layout), ctypes.byref(cfg),
-            out_key.shape[0], c_void_p(stream),
-        )
-        if rc != 0:
-            self._kernel_raise(rc, "polar", "dequant_kv")
-
-    def polar_fused_attn_output(
-        self,
-        query:         torch.Tensor,
-        page_pool:     torch.Tensor,
-        slot_mapping:  torch.Tensor,
-        output:        torch.Tensor,
-        layout:        TQPolarPageLayout,
-        cfg:           TQConfig,
-        num_queries:   int,
-        num_kv_tokens: int,
-        stream:        int = 0,
-    ) -> None:
-        """Fused attention over PolarQuant-compressed KV pool; single-pass online softmax."""
-        rc = self._lib.tq_launch_polar_fused_attention_output(
-            self._vp(query),
-            self._u8p(page_pool), self._i32p(slot_mapping),
-            self._vp(output),
-            ctypes.byref(layout), ctypes.byref(cfg),
-            num_queries, num_kv_tokens, c_void_p(stream),
-        )
-        if rc != 0:
-            self._kernel_raise(rc, "polar", "fused_attn_output")
-
-    # ─────────────────────────────────────────────────────────────── #
     # Allocation helpers                                              #
     # ─────────────────────────────────────────────────────────────── #
 
@@ -519,20 +400,6 @@ class TurboQuantWrapper:
         num_blocks = (num_tokens + cfg.block_size - 1) // cfg.block_size
         return torch.zeros(num_blocks * layout.page_size_bytes,
                            device="cuda", dtype=torch.uint8)
-
-    def alloc_polar_pool(
-        self,
-        num_tokens: int,
-        layout: TQPolarPageLayout,
-        cfg:    TQConfig,
-    ) -> torch.Tensor:
-        num_blocks = (num_tokens + cfg.block_size - 1) // cfg.block_size
-        return torch.zeros(num_blocks * layout.page_size_bytes,
-                           device="cuda", dtype=torch.uint8)
-
-    def polar_bytes(self, num_tokens: int, layout: TQPolarPageLayout, cfg: TQConfig) -> int:
-        num_blocks = (num_tokens + cfg.block_size - 1) // cfg.block_size
-        return num_blocks * layout.page_size_bytes
 
     def fp16_bytes(self, num_tokens: int, cfg: TQConfig) -> int:
         """Bytes for both K and V in FP16."""
@@ -564,11 +431,6 @@ class TurboQuantWrapper:
             mse_ratio = round(fp16_b / mse_l.page_size_bytes, 2)
         except Exception:
             mse_ratio = "N/A"
-        try:
-            polar_l = self.make_polar_layout_for(cfg)
-            polar_ratio = round(fp16_b / polar_l.page_size_bytes, 2)
-        except Exception:
-            polar_ratio = "N/A"
         return {
             "lib_path": str(self.lib_path),
             "config": {
@@ -577,7 +439,6 @@ class TurboQuantWrapper:
                 "head_dim":     cfg.head_dim,
                 "nbits":        cfg.nbits,
             },
-            "compression_ratio_vs_fp16":       round(fp16_b / prod.page_size_bytes, 2),
-            "mse_compression_ratio_vs_fp16":   mse_ratio,
-            "polar_compression_ratio_vs_fp16": polar_ratio,
+            "turbo_prod_compression_ratio_vs_fp16": round(fp16_b / prod.page_size_bytes, 2),
+            "turbo_mse_compression_ratio_vs_fp16":  mse_ratio,
         }

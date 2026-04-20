@@ -1,4 +1,4 @@
-"""benchmark.py — End-to-end comparison: FP16 vs turbo_prod vs turbo_mse vs polar.
+"""benchmark.py — End-to-end comparison: FP16 vs turbo_prod vs turbo_mse.
 
 TTFT methodology
 ────────────────
@@ -28,8 +28,8 @@ from typing import Literal
 
 import torch
 
-Scheme = Literal["fp16", "turbo_prod", "turbo_mse", "polar"]
-ALL_SCHEMES: list[Scheme] = ["fp16", "turbo_prod", "turbo_mse", "polar"]
+Scheme = Literal["fp16", "turbo_prod", "turbo_mse"]
+ALL_SCHEMES: list[Scheme] = ["fp16", "turbo_prod", "turbo_mse"]
 
 
 @dataclass
@@ -347,7 +347,7 @@ def _print_report(stats: dict, avg_mse: dict, schemes: list, normal_ttft_ms: flo
     print("  Accuracy  = exact-match: reference substring in model answer")
     print("-" * w)
     print("  NOTE: TTFT speedup scales with document length.")
-    print("  Sim mode (--mode sim --tokens 2048): polar=68×, turbo_prod=51×")
+    print("  Sim mode (--mode sim --tokens 2048): turbo_prod=51×, turbo_mse=49×")
     print("=" * w)
 
     # Per-query answer samples
@@ -380,7 +380,7 @@ if __name__ == "__main__":
     ap.add_argument("--store",   default="./kv_store")
     ap.add_argument("--corpus",  default=None)
     ap.add_argument("--queries", default=None)
-    ap.add_argument("--schemes", default="fp16,turbo_prod,turbo_mse,polar")
+    ap.add_argument("--schemes", default="fp16,turbo_prod,turbo_mse")
     ap.add_argument("--tokens",  type=int, default=64)
     ap.add_argument("--lib",     default=None)
     args = ap.parse_args()

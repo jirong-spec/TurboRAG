@@ -322,7 +322,7 @@ def run_longbench_benchmark(
     from tq_backend.model_runner import TQModelRunner
 
     if schemes is None:
-        schemes = ["fp16", "turbo_prod", "turbo_mse", "polar"]
+        schemes = ["fp16", "turbo_prod", "turbo_mse"]
     if pad_to_length is None:
         pad_to_length = max_length
 

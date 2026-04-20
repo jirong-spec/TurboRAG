@@ -22,7 +22,7 @@ def main():
     ap.add_argument("--corpus",  default=None, help="JSONL file: {id, text} per line")
     ap.add_argument("--text",    default=None, help="Single document text")
     ap.add_argument("--doc-id",  default="doc_0", help="Doc ID when --text is used")
-    ap.add_argument("--schemes", default="fp16,turbo_prod,turbo_mse,polar")
+    ap.add_argument("--schemes", default="fp16,turbo_prod,turbo_mse")
     ap.add_argument("--lib",     default=None)
     ap.add_argument("--overwrite", action="store_true")
     args = ap.parse_args()

@@ -1,10 +1,9 @@
 """ttft_sim.py — Pure-GPU TTFT benchmark (no LLM download required).
 
-Simulates end-to-end TTFT for all four schemes on real GPU hardware:
-  FP16       : L × (QKV proj + QK^T attn + FFN)  matmuls
+Simulates end-to-end TTFT on real GPU hardware:
+  FP16       : L × (QKV proj + QK^T attn + FFN) matmuls
   turbo_prod : L × disk_load_time (pre-packed turbo_prod KV)
   turbo_mse  : L × disk_load_time (pre-packed turbo_mse KV)
-  polar      : L × disk_load_time (pre-packed polar KV)
 
 Uses actual CUDA timing, not estimates.  No model weights needed.
 """
@@ -105,8 +104,6 @@ def simulate_disk_load_us(
         layout = tq.make_layout_for(cfg)
     elif scheme == "turbo_mse":
         layout = tq.make_mse_layout_for(cfg)
-    elif scheme == "polar":
-        layout = tq.make_polar_layout_for(cfg)
     else:
         return 0.0
 
@@ -125,19 +122,14 @@ def simulate_disk_load_us(
         elif scheme == "turbo_mse":
             pool = tq.alloc_mse_pool(num_tokens, layout, cfg)
             tq.mse_pack(key, value, slots, pool, layout, cfg)
-        elif scheme == "polar":
-            pool = tq.alloc_polar_pool(num_tokens, layout, cfg)
-            tq.polar_pack(key, value, slots, pool, layout, cfg)
         torch.cuda.synchronize()
         with pool_p.open("wb") as f:
             f.write(pool.cpu().numpy().tobytes())
 
     if scheme == "turbo_prod":
         pool_bytes = tq.quant_bytes(num_tokens, layout, cfg)
-    elif scheme == "turbo_mse":
-        pool_bytes = tq.mse_bytes(num_tokens, layout, cfg)
     else:
-        pool_bytes = tq.polar_bytes(num_tokens, layout, cfg)
+        pool_bytes = tq.mse_bytes(num_tokens, layout, cfg)
 
     def _load():
         raw = pool_p.read_bytes()
@@ -172,14 +164,12 @@ def run_ttft_sim(
     tq = TurboQuantWrapper()
 
     cfg = _make_cfg(model["num_kv_heads"], model["head_dim"])
-    prod_layout  = tq.make_layout_for(cfg)
-    mse_layout   = tq.make_mse_layout_for(cfg)
-    polar_layout = tq.make_polar_layout_for(cfg)
+    prod_layout = tq.make_layout_for(cfg)
+    mse_layout  = tq.make_mse_layout_for(cfg)
 
-    fp16_b  = tq.fp16_bytes(num_tokens, cfg)
-    prod_b  = tq.quant_bytes(num_tokens, prod_layout, cfg)
-    mse_b   = tq.mse_bytes(num_tokens, mse_layout, cfg)
-    polar_b = tq.polar_bytes(num_tokens, polar_layout, cfg)
+    fp16_b = tq.fp16_bytes(num_tokens, cfg)
+    prod_b = tq.quant_bytes(num_tokens, prod_layout, cfg)
+    mse_b  = tq.mse_bytes(num_tokens, mse_layout, cfg)
 
     print(f"Simulating TTFT for N={num_tokens} tokens, L={num_layers} layers ...")
 
@@ -191,9 +181,9 @@ def run_ttft_sim(
     print(f"  FP16 prefill (L={num_layers}):  {prefill_us/1e3:.1f} ms")
 
     disk_us: dict[str, float] = {}
-    for scheme in ["turbo_prod", "turbo_mse", "polar"]:
+    for scheme in ["turbo_prod", "turbo_mse"]:
         us = simulate_disk_load_us(tq, scheme, num_tokens, model["num_kv_heads"], model["head_dim"], store_dir, warmup, iters)
-        disk_us[scheme] = us * num_layers   # total for all layers
+        disk_us[scheme] = us * num_layers
         print(f"  {scheme:<12} disk load (L×):  {disk_us[scheme]/1e3:.1f} ms  (single={us:.1f} µs)")
 
     results = {
@@ -206,13 +196,9 @@ def run_ttft_sim(
             "speedup":    1.0,
         },
     }
-    for scheme, label, b in [
-        ("turbo_prod", "turbo_prod", prod_b),
-        ("turbo_mse",  "turbo_mse",  mse_b),
-        ("polar",      "polar",      polar_b),
-    ]:
+    for scheme, b in [("turbo_prod", prod_b), ("turbo_mse", mse_b)]:
         ttft = disk_us[scheme]
-        results[label] = {
+        results[scheme] = {
             "ttft_us":    ttft,
             "kv_mb":      b / 1024**2 * num_layers,
             "vram_ratio": fp16_b / max(b, 1),

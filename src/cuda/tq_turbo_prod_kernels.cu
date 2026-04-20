@@ -1,5 +1,6 @@
 #include "tq_turbo_prod_kernels.cuh"
 #include "tq_shared_device.cuh"
+#include "tq_cuda_check.h"
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <math_constants.h>
@@ -655,6 +656,8 @@ void launch_tq_turbo_prod_pack_kv(
     turbo_prod_pack_kv_kernel<128><<<grid, threads, shmem, stream>>>(
         key, value, slot_mapping, page_pool, layout, cfg, num_tokens,
         debug_k_rot, debug_v_rot, debug_kn, debug_vn, debug_kidx, debug_vidx);
+    TQ_CHECK_LAUNCH("turbo_prod_pack_kv_kernel");
+    TQ_CHECK_ASYNC(stream);
 }
 
 void launch_tq_turbo_prod_dequant_kv(
@@ -674,6 +677,8 @@ void launch_tq_turbo_prod_dequant_kv(
     size_t shmem = sizeof(float) * (2 * 128);
     turbo_prod_dequant_kv_kernel<128><<<grid, threads, shmem, stream>>>(
         page_pool, slot_mapping, out_key, out_value, layout, cfg, num_tokens);
+    TQ_CHECK_LAUNCH("turbo_prod_dequant_kv_kernel");
+    TQ_CHECK_ASYNC(stream);
 }
 
 void launch_tq_turbo_prod_fused_attention_logits(
@@ -694,6 +699,8 @@ void launch_tq_turbo_prod_fused_attention_logits(
     size_t shmem = sizeof(float) * (3 * 128);
     turbo_prod_fused_attention_logits_kernel<128><<<grid, threads, shmem, stream>>>(
         query, page_pool, slot_mapping, logits, layout, cfg, num_queries, num_kv_tokens);
+    TQ_CHECK_LAUNCH("turbo_prod_fused_attention_logits_kernel");
+    TQ_CHECK_ASYNC(stream);
 }
 
 void launch_tq_turbo_prod_fused_attention_output(
@@ -716,4 +723,6 @@ void launch_tq_turbo_prod_fused_attention_output(
     turbo_prod_fused_attn_online_kernel<128><<<grid, threads, shmem, stream>>>(
         query, page_pool, slot_mapping, output,
         layout, cfg, num_queries, num_kv_tokens);
+    TQ_CHECK_LAUNCH("turbo_prod_fused_attn_online_kernel");
+    TQ_CHECK_ASYNC(stream);
 }

@@ -11,7 +11,7 @@ runner.precompute_corpus({"doc1": "text of doc 1", "doc2": "text of doc 2"})
 results = runner.benchmark_query(
     query="What is TurboQuant?",
     doc_ids=["doc1"],
-    schemes=["fp16", "turbo_prod", "turbo_mse", "polar"],
+    schemes=["fp16", "turbo_prod", "turbo_mse"],
 )
 """
 from __future__ import annotations
@@ -25,7 +25,7 @@ import torch
 
 from .turboquant_wrapper import TurboQuantWrapper
 
-Scheme = Literal["fp16", "turbo_prod", "turbo_mse", "polar"]
+Scheme = Literal["fp16", "turbo_prod", "turbo_mse"]
 
 
 @dataclass
@@ -96,7 +96,7 @@ class TQModelRunner:
             Callers should skip these docs in downstream evaluation.
         """
         if schemes is None:
-            schemes = ["fp16", "turbo_prod", "turbo_mse", "polar"]
+            schemes = ["fp16", "turbo_prod", "turbo_mse"]
 
         failed: set[str] = set()
 
@@ -182,7 +182,7 @@ class TQModelRunner:
         self,
         query: str,
         doc_ids: list[str],
-        scheme: Scheme = "polar",
+        scheme: Scheme = "turbo_prod",
         max_new_tokens: int = 64,
     ) -> RunResult:
         """Generate answer; return tokens + timing."""
@@ -248,7 +248,7 @@ class TQModelRunner:
         warmup: bool = True,
     ) -> list[RunResult]:
         if schemes is None:
-            schemes = ["fp16", "turbo_prod", "turbo_mse", "polar"]
+            schemes = ["fp16", "turbo_prod", "turbo_mse"]
 
         # Warmup with fp16
         if warmup:
@@ -274,7 +274,7 @@ class TQModelRunner:
         Returns dict[scheme → list of MSE per layer].
         """
         if schemes is None:
-            schemes = ["turbo_prod", "turbo_mse", "polar"]
+            schemes = ["turbo_prod", "turbo_mse"]
         if isinstance(layer_indices, int):
             layer_indices = [layer_indices]
 

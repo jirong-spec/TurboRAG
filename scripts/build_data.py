@@ -15,7 +15,7 @@ python scripts/build_data.py \
     --output-dir data/ \
     --store ./kv_store \
     --model qwen2.5-0.5b \
-    --quant-type turbo_prod,turbo_mse,polar
+    --quant-type turbo_prod,turbo_mse
 
 # JSONL input with sentence chunking
 python scripts/build_data.py \

@@ -1,7 +1,7 @@
 # TurboCAG — Cache-Augmented Generation with Compressed KV
 
 TurboCAG is a research system for **zero-prefill RAG inference** on NVIDIA GPUs.  
-Documents are encoded offline, KV caches are compressed with 4-bit CUDA kernels, and stored to disk. At query time, the model loads the pre-compressed KV and skips prefill entirely — delivering **5–7× TTFT speedup** on LongBench/qasper and **3.6–3.9× VRAM reduction** with near-zero F1 loss on Qwen2.5-3B.
+Documents are encoded offline, KV caches are compressed with 4-bit CUDA kernels, and stored to disk. At query time, the model loads the pre-compressed KV and skips prefill entirely — delivering **5–7× TTFT speedup** on LongBench/qasper and **3.5–3.8× VRAM reduction** with near-zero F1 loss on Qwen2.5-3B.
 
 ---
 
@@ -17,7 +17,6 @@ Document text
     ▼  compress with TurboQuant / PolarQuant CUDA kernels
     │   turbo_prod : K=3-bit + 1-bit residual, V=4-bit   → 3.8× compression
     │   turbo_mse  : INT4 MSE-optimal                    → 3.5× compression
-    │   polar      : Hadamard-rotated K=4-bit, V=4-bit   → 3.9× compression
     │
     ▼  save compressed page_pool to disk  (.bin + .meta per layer)
 
@@ -54,11 +53,10 @@ TTFT = disk\_load(36 layers) + query\_prefill. Normal-RAG prefill at 32K tokens 
 | fp16 CAG   | 1 538.7 ms    | 1 538 ms | 1 550 ms | **1 152 MB** | 1.0×   |
 | turbo\_prod | **1 102.8 ms** | 1 110 ms | 1 133 ms | 302 MB    | **3.8×** |
 | turbo\_mse  | 1 137.2 ms    | 1 148 ms | 1 168 ms | 324 MB    | **3.6×** |
-| polar      | **1 098.5 ms** | 1 101 ms | 1 121 ms | **297 MB** | **3.9×** |
 
 Key takeaways at 32K context:
-- **TTFT gap: 440 ms** (fp16 → polar), 29% faster decode start
-- **VRAM gap: 3.9×** — polar saves ~855 MB per inference vs fp16 KV
+- **TTFT gap: 436 ms** (fp16 → turbo_prod), 28% faster decode start
+- **VRAM gap: 3.8×** — turbo_prod saves ~850 MB per inference vs fp16 KV
 - 1 doc skipped (OOM during 32K forward-pass precompute); 99/100 succeeded
 
 ### LongBench / qasper — short context (20 samples, avg 5 926 context tokens)
@@ -71,7 +69,6 @@ TTFT = disk\_load(36 layers) + query\_prefill. F1 = token-level F1 vs ground tru
 | fp16 CAG   | 1 049 ms    | 194.9 ms  | **5.4×** | 208 MB    | 1.0×     | 0.199 |
 | turbo\_prod | 1 049 ms    | 161.4 ms  | **6.5×** | 54.6 MB   | **3.8×** | 0.208 |
 | turbo\_mse  | 1 049 ms    | 162.2 ms  | **6.5×** | 58.7 MB   | **3.6×** | 0.231 |
-| polar      | 1 049 ms    | 159.7 ms  | **6.6×** | 53.8 MB   | **3.9×** | 0.231 |
 
 ### TTFT Scaling — Sim Mode (Qwen2.5-3B scale, 1 143 tokens, 36 layers)
 
@@ -80,7 +77,6 @@ TTFT = disk\_load(36 layers) + query\_prefill. F1 = token-level F1 vs ground tru
 | FP16       | 129.2 ms | 1.0×                   | 1.0×     |
 | turbo\_prod | 3.4 ms  | **37.9×**               | 3.6×     |
 | turbo\_mse  | 3.5 ms  | **36.9×**               | 3.2×     |
-| polar      | 2.7 ms  | **47.8×**               | **3.7×** |
 
 > Sim mode measures pure GPU disk-load latency vs FP16 prefill (no model weights needed).  
 > Full-inference speedup is lower because query prefill is shared across all schemes.
@@ -96,15 +92,12 @@ TurboCAG/
 │   ├── tq_config.h
 │   ├── tq_turbo_prod.cuh     # turbo_prod layout + kernel declarations
 │   ├── tq_turbo_mse_layout.h
-│   ├── tq_polar_layout.h     # PolarQuant layout
-│   ├── tq_polar.cuh
 │   └── ...
 ├── src/
 │   ├── tq_capi.cpp           # extern "C" API surface
 │   └── cuda/
 │       ├── tq_turbo_prod_kernels.cu
-│       ├── tq_turbo_mse_kernels.cu
-│       └── tq_polar_kernels.cu
+│       └── tq_turbo_mse_kernels.cu
 ├── build/
 │   └── libturboquant.so      # Compiled shared library
 ├── tq_backend/               # Python CAG pipeline
@@ -170,7 +163,7 @@ python scripts/build_data.py \
   --output-dir data/ \
   --store ./kv_store \
   --model qwen2.5-3b \
-  --quant-type fp16,turbo_prod,polar
+  --quant-type fp16,turbo_prod,turbo_mse
 ```
 
 Supported formats: `--formats txt,md,jsonl,csv,pdf`  
@@ -186,7 +179,7 @@ Model shorthands: `qwen2.5-0.5b`, `qwen2.5-3b`, `llama3.2-3b`, `mistral-7b`, …
 python scripts/precompute_cag.py \
   --corpus data/long_corpus.jsonl \
   --store ./kv_store \
-  --schemes fp16,turbo_prod,turbo_mse,polar
+  --schemes fp16,turbo_prod,turbo_mse
 ```
 
 ### 3a. GPU TTFT simulation (no model download)
@@ -233,7 +226,7 @@ from tq_backend import TQModelRunner
 runner = TQModelRunner("Qwen/Qwen2.5-3B-Instruct", store_dir="./kv_store")
 runner.precompute_corpus(
     {"doc1": "text of document one ...", "doc2": "text of document two ..."},
-    schemes=["fp16", "turbo_prod", "turbo_mse", "polar"],
+    schemes=["fp16", "turbo_prod", "turbo_mse"],
 )
 ```
 
@@ -282,9 +275,9 @@ from tq_backend.cag_store import CAGStore
 cag   = CAGStore("./kv_store")
 query = torch.randn(1, 2, 128, device="cuda", dtype=torch.float16)  # [1, H_kv, D]
 
-pool, slots, N = cag.load_document("doc1", layer_idx=0, scheme="polar",
+pool, slots, N = cag.load_document("doc1", layer_idx=0, scheme="turbo_prod",
                                    head_shape=(2, 128))
-output = cag.fused_attention(query, pool, slots, N, "polar", (2, 128))
+output = cag.fused_attention(query, pool, slots, N, "turbo_prod", (2, 128))
 # output: [1, 2, 128] fp16 — softmax-weighted sum, no FP16 KV materialised
 ```
 
@@ -292,11 +285,10 @@ output = cag.fused_attention(query, pool, slots, N, "polar", (2, 128))
 
 ## Compression Schemes
 
-| Scheme      | K bits | V bits | Method                        | Compression | AttnMSE   |
-|-------------|--------|--------|-------------------------------|-------------|-----------|
-| turbo\_prod  | 3+1    | 4      | Lloyd-Max + QJL residual      | **3.8×**    | 0.00028   |
-| turbo\_mse   | 4      | 4      | INT4 MSE-optimal              | **3.5×**    | 0.00078   |
-| polar       | 4      | 4      | Hadamard rotation + INT4 coding | **3.9×**  | 0.04774   |
+| Scheme      | K bits | V bits | Method                   | Compression | AttnMSE   |
+|-------------|--------|--------|--------------------------|-------------|-----------|
+| turbo\_prod  | 3+1    | 4      | Lloyd-Max + QJL residual | **3.8×**    | 0.00028   |
+| turbo\_mse   | 4      | 4      | INT4 MSE-optimal         | **3.5×**    | 0.00078   |
 
 All kernels use **online softmax** (FlashAttention-style) — no FP16 KV tensor is ever written to global memory during decode.
 
