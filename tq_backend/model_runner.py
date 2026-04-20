@@ -81,8 +81,16 @@ class TQModelRunner:
         corpus: dict[str, str],
         schemes: list[Scheme] | None = None,
         overwrite: bool = False,
+        max_length: int | None = None,
     ) -> None:
-        """Extract and compress KV for each document for all schemes."""
+        """Extract and compress KV for each document for all schemes.
+
+        Args:
+            max_length: If set, truncate each document to this many tokens
+                        before the forward pass.  Useful for long-context
+                        benchmarks (e.g. LongBench at 32K tokens) to avoid
+                        exceeding the model's context window.
+        """
         if schemes is None:
             schemes = ["fp16", "turbo_prod", "turbo_mse", "polar"]
 
@@ -97,7 +105,7 @@ class TQModelRunner:
                 continue
 
             print(f"  [pack] {doc_id}  ({len(text)} chars) ...", end=" ", flush=True)
-            kv_per_layer = self._extract_kv(text)
+            kv_per_layer = self._extract_kv(text, max_length=max_length)
             total_bytes = 0
             for layer_idx, (k, v) in enumerate(kv_per_layer):
                 for scheme in schemes:
@@ -105,22 +113,49 @@ class TQModelRunner:
                     total_bytes += b
             print(f"done  ({total_bytes / 1024:.1f} KB across {len(schemes)} schemes)")
 
-    def _extract_kv(self, text: str) -> list[tuple[torch.Tensor, torch.Tensor]]:
+    def _extract_kv(
+        self,
+        text: str,
+        max_length: int | None = None,
+    ) -> list[tuple[torch.Tensor, torch.Tensor]]:
         """Forward-pass text, collect per-layer KV tensors.
 
         Returns list of (key, value) each shaped [S, H_kv, D] fp16 on CUDA.
         """
-        tokens = self.tokenizer(text, return_tensors="pt").to(self.device)
+        tokens = self.tokenizer(
+            text,
+            return_tensors="pt",
+            truncation=max_length is not None,
+            max_length=max_length,
+        ).to(self.device)
         with torch.no_grad():
-            out = self.model(**tokens, use_cache=True)
+            # Use model.model() (base transformer, no lm_head) so the logit
+            # projection (vocab=152K) is never materialised — avoids OOM at
+            # sequences longer than ~17K tokens on a 12 GB GPU.
+            out = self.model.model(**tokens, use_cache=True)
 
-        pkv = out.past_key_values  # DynamicCache with .layers[]
+        pkv = out.past_key_values
         kv_cache = []
-        for layer_cache in pkv.layers:
-            # layer_cache.keys / .values : [B, H_kv, S, D]
-            k = layer_cache.keys[0].permute(1, 0, 2).contiguous()   # [S, H_kv, D]
-            v = layer_cache.values[0].permute(1, 0, 2).contiguous()
-            kv_cache.append((k, v))
+
+        # transformers >= 4.38: DynamicCache with key_cache / value_cache lists
+        if hasattr(pkv, "key_cache"):
+            for k_bhsd, v_bhsd in zip(pkv.key_cache, pkv.value_cache):
+                k = k_bhsd[0].permute(1, 0, 2).contiguous()  # [S, H, D]
+                v = v_bhsd[0].permute(1, 0, 2).contiguous()
+                kv_cache.append((k, v))
+        # older transformers: tuple of (k, v) pairs per layer
+        elif isinstance(pkv, (tuple, list)):
+            for layer_kv in pkv:
+                k = layer_kv[0][0].permute(1, 0, 2).contiguous()
+                v = layer_kv[1][0].permute(1, 0, 2).contiguous()
+                kv_cache.append((k, v))
+        # custom cache with .layers[].keys / .values
+        else:
+            for layer_cache in pkv.layers:
+                k = layer_cache.keys[0].permute(1, 0, 2).contiguous()
+                v = layer_cache.values[0].permute(1, 0, 2).contiguous()
+                kv_cache.append((k, v))
+
         return kv_cache
 
     # ── online: single-scheme inference ────────────────────────────── #

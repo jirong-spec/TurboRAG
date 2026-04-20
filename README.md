@@ -1,7 +1,7 @@
 # TurboCAG — Cache-Augmented Generation with Compressed KV
 
 TurboCAG is a research system for **zero-prefill RAG inference** on NVIDIA GPUs.  
-Documents are encoded offline, KV caches are compressed with 4-bit CUDA kernels, and stored to disk. At query time, the model loads the pre-compressed KV and skips prefill entirely — delivering **37–48× TTFT speedup** and **3.2–3.7× VRAM reduction** with near-zero accuracy loss on Qwen2.5-3B.
+Documents are encoded offline, KV caches are compressed with 4-bit CUDA kernels, and stored to disk. At query time, the model loads the pre-compressed KV and skips prefill entirely — delivering **5–7× TTFT speedup** on LongBench/qasper and **3.6–3.9× VRAM reduction** with near-zero F1 loss on Qwen2.5-3B.
 
 ---
 
@@ -41,30 +41,21 @@ For a 1143-token document on Qwen2.5-3B: prefill takes 244 ms; CAG loads KV in ~
 
 ## Benchmark Results — Qwen2.5-3B-Instruct
 
-Hardware: **NVIDIA GeForce RTX 3060 12 GB**, CUDA 12.4  
-Corpus: GYG travel activities dataset, 700–1143 tokens per document  
-Metric: CAG TTFT = disk\_load(all 36 layers) + query\_prefill
+Hardware: **NVIDIA GeForce RTX 3060 12 GB**, CUDA 12.4
 
-### TTFT & VRAM (full model inference)
+### LongBench / qasper (20 samples, avg 5 926 context tokens)
 
-| Scheme     | Normal RAG | CAG TTFT | Speedup  | KV VRAM | VRAM×    |
-|------------|------------|----------|----------|---------|----------|
-| fp16 CAG   | 244.4 ms   | 46.2 ms  | **5.3×** | 24.3 MB | 1.0×     |
-| turbo\_prod | 244.4 ms   | 40.0 ms  | **6.1×** | 6.5 MB  | **3.8×** |
-| turbo\_mse  | 244.4 ms   | 40.1 ms  | **6.1×** | 7.0 MB  | **3.5×** |
-| polar      | 244.4 ms   | 39.0 ms  | **6.3×** | 5.4 MB  | **4.5×** |
+Dataset: [THUDM/LongBench](https://huggingface.co/datasets/THUDM/LongBench) `qasper` test split — single-doc QA on scientific papers.  
+TTFT = disk\_load(all 36 layers) + query\_prefill. F1 = token-level F1 vs ground truth.
 
-### Accuracy & Attention Fidelity
+| Scheme     | Normal RAG  | CAG TTFT  | Speedup  | KV VRAM   | VRAM×    | F1    |
+|------------|-------------|-----------|----------|-----------|----------|-------|
+| fp16 CAG   | 1049 ms     | 194.9 ms  | **5.4×** | 208.3 MB  | 1.0×     | 0.199 |
+| turbo\_prod | 1049 ms     | 161.4 ms  | **6.5×** | 54.6 MB   | **3.8×** | 0.208 |
+| turbo\_mse  | 1049 ms     | 162.2 ms  | **6.5×** | 58.7 MB   | **3.6×** | 0.231 |
+| polar      | 1049 ms     | 159.7 ms  | **6.6×** | 53.8 MB   | **3.9×** | 0.231 |
 
-| Scheme     | Accuracy | AttnMSE    | Notes                              |
-|------------|----------|------------|------------------------------------|
-| fp16 CAG   | **75%**  | 0 (ref)    | Lossless reference                 |
-| turbo\_prod | **67%**  | **0.00028** | −8pp vs fp16; near-lossless        |
-| turbo\_mse  | 33%      | 0.00078    | Lower MSE but more hallucination   |
-| polar      | 33%      | 0.04774    | 4-bit WHT-rotated; balanced noise  |
-
-AttnMSE = attention output MSE vs FP16 reference (per layer, averaged over 3 layers).  
-Accuracy = exact-match: reference answer substring found in model output.
+F1 scores are low across all schemes — LongBench/qasper is a hard extractive QA task even for fp16; the relative ordering (turbo\_mse ≈ polar > turbo\_prod ≈ fp16) shows compressed KV preserves answer quality.
 
 ### TTFT Scaling — Sim Mode (Qwen2.5-3B scale, 1143 tokens, 36 layers)
 
@@ -75,8 +66,8 @@ Accuracy = exact-match: reference answer substring found in model output.
 | turbo\_mse  | 3.5ms   | **36.9×**               | 3.2×     |
 | polar      | 2.7ms   | **47.8×**               | **3.7×** |
 
-> Sim mode measures pure GPU prefill vs disk-load latency (no model weights needed).  
-> Full-inference speedup is lower because query prefill (~35ms) is shared across all schemes.
+> Sim mode measures pure GPU disk-load latency vs FP16 prefill (no model weights needed).  
+> Full-inference speedup is lower because query prefill (~29 ms) is shared across all schemes.
 
 ---
 
@@ -111,7 +102,7 @@ TurboCAG/
 │   ├── build_data.py         # Scan docs (txt/md/jsonl/csv/pdf) → corpus.jsonl + optional KV precompute
 │   ├── precompute_cag.py     # Offline: compress corpus to disk (low-level)
 │   ├── migrate_store.py      # Migrate old MD5-named stores to SHA-256 naming
-│   └── run_benchmark.py      # --mode sim | --mode full
+│   └── run_benchmark.py      # --mode sim | --mode full | --mode longbench
 └── data/
     ├── gyg_qa_5000.jsonl     # GYG activity Q&A pairs
     ├── long_corpus.jsonl     # Country-grouped long documents
@@ -188,7 +179,21 @@ python scripts/precompute_cag.py \
 python scripts/run_benchmark.py --mode sim --tokens 1143 --layers 36
 ```
 
-### 3b. Full end-to-end benchmark (Qwen2.5-3B)
+### 3b. LongBench benchmark (TTFT + VRAM + F1)
+
+```bash
+pip install datasets   # one-time
+
+python scripts/run_benchmark.py \
+  --mode longbench \
+  --dataset qasper \
+  --model Qwen/Qwen2.5-3B-Instruct \
+  --max-samples 20 --max-length 32768
+
+# Also supports: --dataset 2wikimqa,gov_report  --ttft-only
+```
+
+### 3c. Full end-to-end benchmark (custom corpus)
 
 ```bash
 python scripts/run_benchmark.py \
