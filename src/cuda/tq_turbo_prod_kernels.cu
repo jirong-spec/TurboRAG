@@ -28,9 +28,7 @@ __device__ __constant__ float kK3Codebook[8] = {
      0.244919f, 0.755526f, 1.34326f, 2.1513f
 };
 
-/*
-V: 4-bit codebook
-*/
+// V: 4-bit codebook
 __device__ __constant__ float kV4Codebook[16] = {
     -2.7326f, -2.0690f, -1.6180f, -1.2562f,
     -0.9423f, -0.6568f, -0.3880f, -0.1284f,
@@ -44,10 +42,7 @@ __device__ __forceinline__ int nearest_k3_idx(float x) {
     #pragma unroll
     for (int i = 1; i < 8; ++i) {
         float d = fabsf(x - kK3Codebook[i]);
-        if (d < best_dist) {
-            best_dist = d;
-            best = i;
-        }
+        if (d < best_dist) { best_dist = d; best = i; }
     }
     return best;
 }
@@ -58,78 +53,38 @@ __device__ __forceinline__ int nearest_v4_idx(float x) {
     #pragma unroll
     for (int i = 1; i < 16; ++i) {
         float d = fabsf(x - kV4Codebook[i]);
-        if (d < best_dist) {
-            best_dist = d;
-            best = i;
-        }
+        if (d < best_dist) { best_dist = d; best = i; }
     }
     return best;
 }
 
-__device__ __forceinline__ void pack_3bit_set(uint8_t* dst, int idx, uint8_t val) {
-    int bit = idx * 3;
-    int byte = bit >> 3;
-    int off = bit & 7;
+// ---------------------------------------------------------------------------
+// K interleaved nibble helpers
+//
+// Each 4-bit nibble encodes one head-dim element:
+//   bits [2:0] = 3-bit Lloyd-Max code   (0–7)
+//   bit  [3]   = 1-bit QJL residual sign
+//
+// Packing two elements per byte: elem[2*i] in lower nibble, elem[2*i+1] in upper.
+// ---------------------------------------------------------------------------
 
-    unsigned int x = (unsigned int)(val & 0x7);
-
-    if (off <= 5) {
-        uint8_t mask = (uint8_t)(0x7u << off);
-        dst[byte] = (uint8_t)((dst[byte] & ~mask) | ((x << off) & mask));
-    } else {
-        int lo_bits = 8 - off;
-        int hi_bits = 3 - lo_bits;
-
-        uint8_t mask0 = (uint8_t)(((1u << lo_bits) - 1u) << off);
-        uint8_t mask1 = (uint8_t)((1u << hi_bits) - 1u);
-
-        dst[byte]     = (uint8_t)((dst[byte] & ~mask0) | (((x & ((1u << lo_bits) - 1u)) << off) & mask0));
-        dst[byte + 1] = (uint8_t)((dst[byte + 1] & ~mask1) | ((x >> lo_bits) & mask1));
-    }
+__device__ __forceinline__ uint8_t make_k4_nibble(int code3, int resbit) {
+    return (uint8_t)(((resbit & 1) << 3) | (code3 & 7));
 }
 
-__device__ __forceinline__ uint8_t unpack_3bit_get(const uint8_t* src, int idx) {
-    int bit = idx * 3;
-    int byte = bit >> 3;
-    int off = bit & 7;
-    unsigned int x = src[byte];
-    if (off > 5) {
-        x |= ((unsigned int)src[byte + 1] << 8);
-    }
-    return (x >> off) & 0x7;
-}
-
-__device__ __forceinline__ void pack_1bit_set(uint8_t* dst, int idx, uint8_t bitv) {
-    int byte = idx >> 3;
-    int off = idx & 7;
-    if (bitv) dst[byte] |= (1u << off);
-}
-
-__device__ __forceinline__ void pack_4bit_set(uint8_t* dst, int idx, uint8_t val) {
-    int byte = idx >> 1;
-    if ((idx & 1) == 0) {
-        dst[byte] = (dst[byte] & 0xF0) | (val & 0x0F);
-    } else {
-        dst[byte] = (dst[byte] & 0x0F) | ((val & 0x0F) << 4);
-    }
-}
-
-__device__ __forceinline__ uint8_t pack_3bit_byte_from_codes(const int* codes, int byte_idx, int D) {
+// Assemble one output byte from the shared-mem code/resbit arrays.
+// byte_idx owns elements at positions 2*byte_idx and 2*byte_idx+1.
+__device__ __forceinline__ uint8_t pack_k4_byte(const int* codes, const int* rbits,
+                                                 int byte_idx, int D) {
+    int i0 = 2 * byte_idx;
+    int i1 = i0 + 1;
     uint8_t out = 0;
-    int bit_base = byte_idx * 8;
-
-    #pragma unroll
-    for (int k = 0; k < 8; ++k) {
-        int global_bit = bit_base + k;
-        int code_idx = global_bit / 3;
-        if (code_idx < D) {
-            int bit_in_code = global_bit % 3;
-            uint8_t bit = (uint8_t)((codes[code_idx] >> bit_in_code) & 1);
-            out |= (uint8_t)(bit << k);
-        }
-    }
+    if (i0 < D) out  = make_k4_nibble(codes[i0], rbits[i0]);
+    if (i1 < D) out |= (uint8_t)(make_k4_nibble(codes[i1], rbits[i1]) << 4);
     return out;
 }
+
+// ---------------------------------------------------------------------------
 
 template<int MAX_D>
 __device__ void hadamard_inplace(float* x, int D) {
@@ -137,12 +92,11 @@ __device__ void hadamard_inplace(float* x, int D) {
         int tid = threadIdx.x;
         int butterfly = D >> 1;
         if (tid < butterfly) {
-            int group = tid / len;
+            int group  = tid / len;
             int offset = tid % len;
             int i0 = group * (len << 1) + offset;
             int i1 = i0 + len;
-            float a = x[i0];
-            float b = x[i1];
+            float a = x[i0], b = x[i1];
             x[i0] = a + b;
             x[i1] = a - b;
         }
@@ -150,6 +104,9 @@ __device__ void hadamard_inplace(float* x, int D) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Pack kernel
+// ---------------------------------------------------------------------------
 template<int MAX_D>
 __global__ void turbo_prod_pack_kv_kernel(
     const half* __restrict__ key,
@@ -167,8 +124,8 @@ __global__ void turbo_prod_pack_kv_kernel(
     int* __restrict__ debug_vidx) {
 
     int token_idx = blockIdx.x;
-    int head_idx = blockIdx.y;
-    int tid = threadIdx.x;
+    int head_idx  = blockIdx.y;
+    int tid       = threadIdx.x;
 
     if (token_idx >= num_tokens || head_idx >= cfg.num_kv_heads) return;
     if (cfg.head_dim > MAX_D) return;
@@ -176,46 +133,52 @@ __global__ void turbo_prod_pack_kv_kernel(
     int D = cfg.head_dim;
     if (tid >= D) return;
 
-    int slot = slot_mapping[token_idx];
+    int slot           = slot_mapping[token_idx];
     int physical_block = slot / cfg.block_size;
     int token_in_block = slot % cfg.block_size;
 
     uint8_t* page_base = page_pool + (size_t)physical_block * layout.page_size_bytes;
 
-    uint8_t* k3_codes = page_base + layout.k3_codes_offset +
-        turbo_prod_token_head_offset(token_in_block, head_idx, cfg.num_kv_heads, layout.k3_bytes_per_token_head);
-    uint8_t* kres = page_base + layout.k_residual_offset +
-        turbo_prod_token_head_offset(token_in_block, head_idx, cfg.num_kv_heads, layout.kres_bytes_per_token_head);
+    // K interleaved nibble stream
+    uint8_t* k4_codes = page_base + layout.k4_codes_offset +
+        turbo_prod_token_head_offset(token_in_block, head_idx,
+                                     cfg.num_kv_heads, layout.k4_bytes_per_token_head);
+
     half* kres_scale = reinterpret_cast<half*>(
         page_base + layout.k_residual_scales_offset +
-        turbo_prod_token_head_offset(token_in_block, head_idx, cfg.num_kv_heads, layout.scale_bytes_per_token_head));
+        turbo_prod_token_head_offset(token_in_block, head_idx,
+                                     cfg.num_kv_heads, layout.scale_bytes_per_token_head));
     half* kscale = reinterpret_cast<half*>(
         page_base + layout.k_scales_offset +
-        turbo_prod_token_head_offset(token_in_block, head_idx, cfg.num_kv_heads, layout.scale_bytes_per_token_head));
+        turbo_prod_token_head_offset(token_in_block, head_idx,
+                                     cfg.num_kv_heads, layout.scale_bytes_per_token_head));
 
     uint8_t* v4_codes = page_base + layout.v4_codes_offset +
-        turbo_prod_token_head_offset(token_in_block, head_idx, cfg.num_kv_heads, layout.v4_bytes_per_token_head);
+        turbo_prod_token_head_offset(token_in_block, head_idx,
+                                     cfg.num_kv_heads, layout.v4_bytes_per_token_head);
     half* vscale = reinterpret_cast<half*>(
         page_base + layout.v_scales_offset +
-        turbo_prod_token_head_offset(token_in_block, head_idx, cfg.num_kv_heads, layout.scale_bytes_per_token_head));
+        turbo_prod_token_head_offset(token_in_block, head_idx,
+                                     cfg.num_kv_heads, layout.scale_bytes_per_token_head));
 
     extern __shared__ float smem[];
-    float* sk = smem;
-    float* sv = smem + MAX_D;
+    float* sk  = smem;
+    float* sv  = smem + MAX_D;
     float* red = smem + 2 * MAX_D;
 
     __shared__ int kidx_s[256];
-    __shared__ int vidx_s[256];
     __shared__ int krbit_s[256];
+    __shared__ int vidx_s[256];
 
-    int base = (token_idx * cfg.num_kv_heads + head_idx) * D;
-
-    if (tid < layout.k3_bytes_per_token_head) k3_codes[tid] = 0;
-    if (tid < layout.kres_bytes_per_token_head) kres[tid] = 0;
-    if (tid < layout.v4_bytes_per_token_head) v4_codes[tid] = 0;
+    // Zero-initialise output buffers (pack_k4_byte does full assignment, but
+    // keep the pattern consistent with v4 for clarity)
+    if (tid < layout.k4_bytes_per_token_head) k4_codes[tid] = 0;
+    if (tid < layout.v4_bytes_per_token_head)  v4_codes[tid] = 0;
     __syncthreads();
 
-    sk[tid] = h2f(key[base + tid]) * sign_flip(tid, head_idx);
+    // Load, sign-flip, WHT
+    int base = (token_idx * cfg.num_kv_heads + head_idx) * D;
+    sk[tid] = h2f(key[base + tid])   * sign_flip(tid, head_idx);
     sv[tid] = h2f(value[base + tid]) * sign_flip(tid, head_idx);
     __syncthreads();
 
@@ -226,6 +189,7 @@ __global__ void turbo_prod_pack_kv_kernel(
     sk[tid] *= inv_sqrt_d;
     sv[tid] *= inv_sqrt_d;
 
+    // K RMS
     red[tid] = sk[tid] * sk[tid];
     __syncthreads();
     for (int stride = D >> 1; stride > 0; stride >>= 1) {
@@ -237,6 +201,7 @@ __global__ void turbo_prod_pack_kv_kernel(
     if (tid == 0) *kscale = f2h(krms);
     __syncthreads();
 
+    // V RMS
     red[tid] = sv[tid] * sv[tid];
     __syncthreads();
     for (int stride = D >> 1; stride > 0; stride >>= 1) {
@@ -254,16 +219,14 @@ __global__ void turbo_prod_pack_kv_kernel(
     float kn = clamp_val(sk[tid] / krms, -2.5f, 2.5f);
     float vn = clamp_val(sv[tid] / vrms, -2.75f, 2.75f);
 
-    int kidx = nearest_k3_idx(kn);
-    float kbase = kK3Codebook[kidx];
-    float e_val = kn - kbase;           // quantisation residual in normalised space
-    int krbit = (e_val >= 0.0f) ? 1 : 0;
+    int kidx  = nearest_k3_idx(kn);
+    float e   = kn - kK3Codebook[kidx];   // QJL residual in normalised space
+    int krbit = (e >= 0.0f) ? 1 : 0;
 
     int vidx = nearest_v4_idx(vn);
 
-    // Compute QJL residual RMS: r_e = sqrt(mean(e^2))
-    // Reuses red[] which is free at this point.
-    red[tid] = e_val * e_val;
+    // QJL residual RMS (re-use red[])
+    red[tid] = e * e;
     __syncthreads();
     for (int stride = D >> 1; stride > 0; stride >>= 1) {
         if (tid < stride) red[tid] += red[tid + stride];
@@ -272,38 +235,33 @@ __global__ void turbo_prod_pack_kv_kernel(
     float rms_e = sqrtf(red[0] / (float)D);
     if (rms_e < 1e-8f) rms_e = 1e-8f;
     if (tid == 0) *kres_scale = f2h(rms_e);
-    // No sync needed: kres_scale is global mem, written once by thread 0.
 
-    kidx_s[tid] = kidx;
+    kidx_s[tid]  = kidx;
     krbit_s[tid] = krbit;
-    vidx_s[tid] = vidx;
+    vidx_s[tid]  = vidx;
 
-    if (debug_kn) debug_kn[base + tid] = kn;
-    if (debug_vn) debug_vn[base + tid] = vn;
+    if (debug_kn)   debug_kn[base + tid]   = kn;
+    if (debug_vn)   debug_vn[base + tid]   = vn;
     if (debug_kidx) debug_kidx[base + tid] = kidx;
     if (debug_vidx) debug_vidx[base + tid] = vidx;
 
     __syncthreads();
 
-        // K: byte-owner parallel pack, one thread owns one output byte.
-    if (tid < layout.k3_bytes_per_token_head) {
-        k3_codes[tid] = pack_3bit_byte_from_codes(kidx_s, tid, D);
+    // K: interleaved nibble pack — each thread owns one byte (two elements)
+    if (tid < layout.k4_bytes_per_token_head) {
+        k4_codes[tid] = pack_k4_byte(kidx_s, krbit_s, tid, D);
     }
 
-    if (tid < layout.kres_bytes_per_token_head) {
-        kres[tid] = pack_1bit_byte_from_bits(krbit_s, tid, D);
-    }
-
-    // V: pair-wise pack, one thread owns one byte.
+    // V: unchanged nibble pack
     if (tid < (D >> 1)) {
-        int i0 = 2 * tid;
-        int i1 = i0 + 1;
-        uint8_t v0 = (uint8_t)vidx_s[i0];
-        uint8_t v1 = (uint8_t)vidx_s[i1];
-        v4_codes[tid] = (uint8_t)((v1 << 4) | v0);
+        int i0 = 2 * tid, i1 = i0 + 1;
+        v4_codes[tid] = (uint8_t)(((uint8_t)vidx_s[i1] << 4) | (uint8_t)vidx_s[i0]);
     }
 }
 
+// ---------------------------------------------------------------------------
+// Dequant kernel
+// ---------------------------------------------------------------------------
 template<int MAX_D>
 __global__ void turbo_prod_dequant_kv_kernel(
     const uint8_t* __restrict__ page_pool,
@@ -315,8 +273,8 @@ __global__ void turbo_prod_dequant_kv_kernel(
     int num_tokens) {
 
     int token_idx = blockIdx.x;
-    int head_idx = blockIdx.y;
-    int tid = threadIdx.x;
+    int head_idx  = blockIdx.y;
+    int tid       = threadIdx.x;
 
     if (token_idx >= num_tokens || head_idx >= cfg.num_kv_heads) return;
     if (cfg.head_dim > MAX_D) return;
@@ -324,46 +282,48 @@ __global__ void turbo_prod_dequant_kv_kernel(
     int D = cfg.head_dim;
     if (tid >= D) return;
 
-    int slot = slot_mapping[token_idx];
+    int slot           = slot_mapping[token_idx];
     int physical_block = slot / cfg.block_size;
     int token_in_block = slot % cfg.block_size;
 
     const uint8_t* page_base = page_pool + (size_t)physical_block * layout.page_size_bytes;
 
-    const uint8_t* k3_codes = page_base + layout.k3_codes_offset +
-        turbo_prod_token_head_offset(token_in_block, head_idx, cfg.num_kv_heads, layout.k3_bytes_per_token_head);
-    const uint8_t* kres = page_base + layout.k_residual_offset +
-        turbo_prod_token_head_offset(token_in_block, head_idx, cfg.num_kv_heads, layout.kres_bytes_per_token_head);
+    const uint8_t* k4_codes = page_base + layout.k4_codes_offset +
+        turbo_prod_token_head_offset(token_in_block, head_idx,
+                                     cfg.num_kv_heads, layout.k4_bytes_per_token_head);
     const half* kres_scale = reinterpret_cast<const half*>(
         page_base + layout.k_residual_scales_offset +
-        turbo_prod_token_head_offset(token_in_block, head_idx, cfg.num_kv_heads, layout.scale_bytes_per_token_head));
+        turbo_prod_token_head_offset(token_in_block, head_idx,
+                                     cfg.num_kv_heads, layout.scale_bytes_per_token_head));
     const half* kscale = reinterpret_cast<const half*>(
         page_base + layout.k_scales_offset +
-        turbo_prod_token_head_offset(token_in_block, head_idx, cfg.num_kv_heads, layout.scale_bytes_per_token_head));
+        turbo_prod_token_head_offset(token_in_block, head_idx,
+                                     cfg.num_kv_heads, layout.scale_bytes_per_token_head));
 
     const uint8_t* v4_codes = page_base + layout.v4_codes_offset +
-        turbo_prod_token_head_offset(token_in_block, head_idx, cfg.num_kv_heads, layout.v4_bytes_per_token_head);
+        turbo_prod_token_head_offset(token_in_block, head_idx,
+                                     cfg.num_kv_heads, layout.v4_bytes_per_token_head);
     const half* vscale = reinterpret_cast<const half*>(
         page_base + layout.v_scales_offset +
-        turbo_prod_token_head_offset(token_in_block, head_idx, cfg.num_kv_heads, layout.scale_bytes_per_token_head));
+        turbo_prod_token_head_offset(token_in_block, head_idx,
+                                     cfg.num_kv_heads, layout.scale_bytes_per_token_head));
 
     extern __shared__ float smem[];
     float* sk = smem;
     float* sv = smem + MAX_D;
 
     float ks = h2f(*kscale);
-    float re = h2f(*kres_scale);   // per-token-head QJL residual RMS
+    float re = h2f(*kres_scale);
     float vs = h2f(*vscale);
 
-    uint8_t kidx = unpack_3bit_get(k3_codes, tid);
-    uint8_t kr   = unpack_1bit_get(kres, tid);
+    // Decode K interleaved nibble: bits[2:0]=code3, bit[3]=resbit
+    uint8_t nibble = unpack_4bit_get(k4_codes, tid);
+    uint8_t kidx   = nibble & 0x7u;
+    float   sign_e = ((nibble >> 3) & 0x1u) ? 1.0f : -1.0f;
+
     uint8_t vidx = unpack_4bit_get(v4_codes, tid);
 
-    // Approximate dequant path: reconstruct using QJL residual scale.
-    // NOTE: this path is for inspection / correctness debugging only.
-    // The fused attention path is canonical for turbo_prod.
-    float kresidual = re * (kr ? 1.0f : -1.0f);
-    float kval = kK3Codebook[kidx] + kresidual;
+    float kval = kK3Codebook[kidx] + re * sign_e;
     float vval = kV4Codebook[vidx];
 
     sk[tid] = kval * ks;
@@ -376,10 +336,13 @@ __global__ void turbo_prod_dequant_kv_kernel(
     float inv_sqrt_d = rsqrtf((float)D);
     int base = (token_idx * cfg.num_kv_heads + head_idx) * D;
 
-    out_key[base + tid] = f2h(sk[tid] * inv_sqrt_d * sign_flip(tid, head_idx));
+    out_key[base + tid]   = f2h(sk[tid] * inv_sqrt_d * sign_flip(tid, head_idx));
     out_value[base + tid] = f2h(sv[tid] * inv_sqrt_d * sign_flip(tid, head_idx));
 }
 
+// ---------------------------------------------------------------------------
+// Fused attention logits kernel
+// ---------------------------------------------------------------------------
 template<int MAX_D>
 __global__ void turbo_prod_fused_attention_logits_kernel(
     const half* __restrict__ query,
@@ -391,18 +354,9 @@ __global__ void turbo_prod_fused_attention_logits_kernel(
     int num_queries,
     int num_kv_tokens) {
 
-    /*
-    Skeleton version:
-    - blockIdx.x = query token
-    - blockIdx.y = kv head
-    - each block computes logits[q, :, head] over kv tokens
-    - one thread handles one dim
-    - directly consumes compressed K, does NOT materialize full K in global memory
-    */
-
-    int q_idx = blockIdx.x;
+    int q_idx    = blockIdx.x;
     int head_idx = blockIdx.y;
-    int tid = threadIdx.x;
+    int tid      = threadIdx.x;
 
     if (q_idx >= num_queries || head_idx >= cfg.num_kv_heads) return;
     if (cfg.head_dim > MAX_D) return;
@@ -412,8 +366,8 @@ __global__ void turbo_prod_fused_attention_logits_kernel(
 
     extern __shared__ float smem[];
     float* qrot = smem;
-    float* kred = smem + MAX_D;
-    float* red = smem + 2 * MAX_D;
+    float* kred = smem + MAX_D;   // reserved, not used — keeps shmem layout stable
+    float* red  = smem + 2 * MAX_D;
 
     int qbase = (q_idx * cfg.num_kv_heads + head_idx) * D;
     qrot[tid] = h2f(query[qbase + tid]) * sign_flip(tid, head_idx);
@@ -425,31 +379,34 @@ __global__ void turbo_prod_fused_attention_logits_kernel(
     __syncthreads();
 
     for (int kv_idx = 0; kv_idx < num_kv_tokens; ++kv_idx) {
-        int slot = slot_mapping[kv_idx];
+        int slot           = slot_mapping[kv_idx];
         int physical_block = slot / cfg.block_size;
         int token_in_block = slot % cfg.block_size;
 
         const uint8_t* page_base = page_pool + (size_t)physical_block * layout.page_size_bytes;
 
-        const uint8_t* k3_codes = page_base + layout.k3_codes_offset +
-            turbo_prod_token_head_offset(token_in_block, head_idx, cfg.num_kv_heads, layout.k3_bytes_per_token_head);
-        const uint8_t* kres = page_base + layout.k_residual_offset +
-            turbo_prod_token_head_offset(token_in_block, head_idx, cfg.num_kv_heads, layout.kres_bytes_per_token_head);
-        const half* kres_scale = reinterpret_cast<const half*>(
+        const uint8_t* k4_codes = page_base + layout.k4_codes_offset +
+            turbo_prod_token_head_offset(token_in_block, head_idx,
+                                         cfg.num_kv_heads, layout.k4_bytes_per_token_head);
+        const half* kres_scale_ptr = reinterpret_cast<const half*>(
             page_base + layout.k_residual_scales_offset +
-            turbo_prod_token_head_offset(token_in_block, head_idx, cfg.num_kv_heads, layout.scale_bytes_per_token_head));
+            turbo_prod_token_head_offset(token_in_block, head_idx,
+                                         cfg.num_kv_heads, layout.scale_bytes_per_token_head));
         const half* kscale = reinterpret_cast<const half*>(
             page_base + layout.k_scales_offset +
-            turbo_prod_token_head_offset(token_in_block, head_idx, cfg.num_kv_heads, layout.scale_bytes_per_token_head));
+            turbo_prod_token_head_offset(token_in_block, head_idx,
+                                         cfg.num_kv_heads, layout.scale_bytes_per_token_head));
 
         float ks     = h2f(*kscale);
-        float re     = h2f(*kres_scale);
-        float res_ks = ks * re;   // combined QJL correction scale
+        float re     = h2f(*kres_scale_ptr);
+        float res_ks = ks * re;
 
-        uint8_t kidx  = unpack_3bit_get(k3_codes, tid);
-        float   base_d = kK3Codebook[kidx];
+        // Decode K nibble once; split into base code and residual sign
+        uint8_t nibble = unpack_4bit_get(k4_codes, tid);
+        float   base_d = kK3Codebook[nibble & 0x7u];
+        float   sign_e = ((nibble >> 3) & 0x1u) ? 1.0f : -1.0f;
 
-        // Stage 1: base inner product from 3-bit Lloyd-Max codes
+        // Stage 1: base inner product from 3-bit code
         red[tid] = qrot[tid] * base_d * ks;
         __syncthreads();
         for (int stride = D >> 1; stride > 0; stride >>= 1) {
@@ -457,10 +414,9 @@ __global__ void turbo_prod_fused_attention_logits_kernel(
             __syncthreads();
         }
         float logit_base = red[0];
-        __syncthreads();  // protect red[0] before second reduction
+        __syncthreads();
 
         // Stage 2: QJL residual correction
-        float sign_e = unpack_1bit_get(kres, tid) ? 1.0f : -1.0f;
         red[tid] = qrot[tid] * sign_e;
         __syncthreads();
         for (int stride = D >> 1; stride > 0; stride >>= 1) {
@@ -474,23 +430,11 @@ __global__ void turbo_prod_fused_attention_logits_kernel(
         }
         __syncthreads();
     }
+    (void)kred;  // suppress unused-variable warning
 }
 
 // ---------------------------------------------------------------------------
-// Full fused attention output kernel — online softmax (no logit_scratch)
-//
-// Per block: one (query, head) pair.  Per thread: one head-dim index.
-//
-// Algorithm (single pass over KV tokens, FlashAttention-style):
-//   For each token t:
-//     1. Decode K_t (rotated domain), compute logit = <qrot, krot>
-//     2. Update running max m and sum l (online softmax)
-//     3. Rescale vaccum by exp(m_old - m_new)
-//     4. Decode V_t (rotated domain), accumulate exp(logit-m_new) * v_rot
-//   Epilogue: normalise vaccum by 1/l, inverse Hadamard + sign-unflip.
-//
-// No logit_scratch global memory needed.
-// Logit convention: <q, k> / sqrt(D)  (standard scaled dot-product attention).
+// Fused attention output kernel — online softmax (FlashAttention-style)
 // ---------------------------------------------------------------------------
 template<int MAX_D>
 __global__ void turbo_prod_fused_attn_online_kernel(
@@ -516,17 +460,15 @@ __global__ void turbo_prod_fused_attn_online_kernel(
     const float inv_sqrt_d = rsqrtf((float)D);
 
     extern __shared__ float smem[];
-    float* qrot   = smem;           // [MAX_D] rotated query
-    float* vaccum = smem + MAX_D;   // [MAX_D] weighted V accumulation
-    float* red    = smem + 2*MAX_D; // [MAX_D] reduction scratch
+    float* qrot   = smem;
+    float* vaccum = smem + MAX_D;
+    float* red    = smem + 2 * MAX_D;
 
-    // Online softmax scalars — maintained by thread 0, broadcast via __syncthreads
-    __shared__ float sh_m;      // running max logit
-    __shared__ float sh_l;      // running sum of exp (softmax denominator)
-    __shared__ float sh_a;      // rescale factor: exp(m_old - m_new)
-    __shared__ float sh_b;      // new-token weight: exp(logit - m_new)
+    __shared__ float sh_m;    // running max logit
+    __shared__ float sh_l;    // running softmax denominator
+    __shared__ float sh_a;    // rescale factor: exp(m_old - m_new)
+    __shared__ float sh_b;    // new-token weight: exp(logit - m_new)
 
-    // Rotate query: sign_flip + WHT + 1/sqrt(D)
     int qbase = (q_idx * cfg.num_kv_heads + head_idx) * D;
     qrot[tid] = h2f(query[qbase + tid]) * sign_flip(tid, head_idx);
     __syncthreads();
@@ -547,28 +489,29 @@ __global__ void turbo_prod_fused_attn_online_kernel(
         const uint8_t* page_base = page_pool +
             (size_t)physical_block * layout.page_size_bytes;
 
-        // ---- K decode → TurboQuantprod two-stage logit ----------------------
-        const uint8_t* k3_codes = page_base + layout.k3_codes_offset +
+        // ---- K decode — single nibble load, two-stage logit ----------------
+        const uint8_t* k4_codes = page_base + layout.k4_codes_offset +
             turbo_prod_token_head_offset(token_in_block, head_idx,
-                                       cfg.num_kv_heads, layout.k3_bytes_per_token_head);
-        const uint8_t* kres = page_base + layout.k_residual_offset +
-            turbo_prod_token_head_offset(token_in_block, head_idx,
-                                       cfg.num_kv_heads, layout.kres_bytes_per_token_head);
+                                         cfg.num_kv_heads, layout.k4_bytes_per_token_head);
         const half* kres_scale_ptr = reinterpret_cast<const half*>(
             page_base + layout.k_residual_scales_offset +
             turbo_prod_token_head_offset(token_in_block, head_idx,
-                                       cfg.num_kv_heads, layout.scale_bytes_per_token_head));
+                                         cfg.num_kv_heads, layout.scale_bytes_per_token_head));
         const half* kscale = reinterpret_cast<const half*>(
             page_base + layout.k_scales_offset +
             turbo_prod_token_head_offset(token_in_block, head_idx,
-                                       cfg.num_kv_heads, layout.scale_bytes_per_token_head));
+                                         cfg.num_kv_heads, layout.scale_bytes_per_token_head));
 
         float ks     = h2f(*kscale);
         float re     = h2f(*kres_scale_ptr);
-        float res_ks = ks * re;   // combined QJL correction scale
+        float res_ks = ks * re;
 
-        // Stage 1: base inner product  logit_base = <qrot, K3[code3] * ks>
-        float base_d = kK3Codebook[unpack_3bit_get(k3_codes, tid)];
+        // One nibble load → code3 + resbit
+        uint8_t nibble = unpack_4bit_get(k4_codes, tid);
+        float   base_d = kK3Codebook[nibble & 0x7u];
+        float   sign_e = ((nibble >> 3) & 0x1u) ? 1.0f : -1.0f;
+
+        // Stage 1: base dot product
         red[tid] = qrot[tid] * base_d * ks;
         __syncthreads();
         for (int stride = D >> 1; stride > 0; stride >>= 1) {
@@ -576,53 +519,50 @@ __global__ void turbo_prod_fused_attn_online_kernel(
             __syncthreads();
         }
         float logit_base = red[0];
-        __syncthreads();  // protect red[0] before second reduction overwrites it
+        __syncthreads();
 
-        // Stage 2: QJL residual correction  logit_res = <qrot, sign_e> * (ks * re)
-        float sign_e = unpack_1bit_get(kres, tid) ? 1.0f : -1.0f;
+        // Stage 2: QJL residual correction
         red[tid] = qrot[tid] * sign_e;
         __syncthreads();
         for (int stride = D >> 1; stride > 0; stride >>= 1) {
             if (tid < stride) red[tid] += red[tid + stride];
             __syncthreads();
         }
-        // All threads now hold the same logit value
         float logit = (logit_base + red[0] * res_ks) * inv_sqrt_d;
 
-        // ---- Online softmax update (thread 0) ------------------------------
+        // ---- Online softmax update (thread 0) --------------------------------
         if (tid == 0) {
             float m_new = fmaxf(sh_m, logit);
-            sh_a = expf(sh_m - m_new);   // rescale factor for existing vaccum
-            sh_b = expf(logit - m_new);  // weight for this V token
+            sh_a = expf(sh_m - m_new);
+            sh_b = expf(logit - m_new);
             sh_l = sh_l * sh_a + sh_b;
             sh_m = m_new;
         }
-        __syncthreads();  // broadcast sh_a, sh_b to all threads
+        __syncthreads();
 
-        vaccum[tid] *= sh_a;  // rescale existing accumulation
+        vaccum[tid] *= sh_a;
 
-        // ---- V decode → accumulate -----------------------------------------
+        // ---- V decode → accumulate ------------------------------------------
         const uint8_t* v4_codes = page_base + layout.v4_codes_offset +
             turbo_prod_token_head_offset(token_in_block, head_idx,
-                                       cfg.num_kv_heads, layout.v4_bytes_per_token_head);
+                                         cfg.num_kv_heads, layout.v4_bytes_per_token_head);
         const half* vscale_ptr = reinterpret_cast<const half*>(
             page_base + layout.v_scales_offset +
             turbo_prod_token_head_offset(token_in_block, head_idx,
-                                       cfg.num_kv_heads, layout.scale_bytes_per_token_head));
+                                         cfg.num_kv_heads, layout.scale_bytes_per_token_head));
 
         float vs   = h2f(*vscale_ptr);
         float vval = kV4Codebook[unpack_4bit_get(v4_codes, tid)] * vs;
         vaccum[tid] += sh_b * vval;
-        __syncthreads();  // barrier before next iteration's reduction
+        __syncthreads();
     }
 
-    // Normalise by softmax denominator
+    // Normalise and inverse-WHT
     __shared__ float sh_inv_l;
     if (tid == 0) sh_inv_l = (sh_l > 0.0f) ? (1.0f / sh_l) : 1.0f;
     __syncthreads();
     vaccum[tid] *= sh_inv_l;
 
-    // Inverse Hadamard + sign-unflip → FP16 output
     __syncthreads();
     hadamard_inplace<MAX_D>(vaccum, D);
 
@@ -631,6 +571,10 @@ __global__ void turbo_prod_fused_attn_online_kernel(
 }
 
 } // namespace
+
+// ---------------------------------------------------------------------------
+// Launch wrappers
+// ---------------------------------------------------------------------------
 
 void launch_tq_turbo_prod_pack_kv(
     const half* key,
@@ -718,7 +662,6 @@ void launch_tq_turbo_prod_fused_attention_output(
         throw std::runtime_error("turbo_prod: head_dim > 128 is not supported");
     dim3 grid(num_queries, cfg.num_kv_heads);
     int threads = cfg.head_dim;
-    // smem: qrot[128] + vaccum[128] + red[128]  (sh_m/l/a/b/inv_l are static __shared__)
     size_t shmem = sizeof(float) * (3 * 128);
     turbo_prod_fused_attn_online_kernel<128><<<grid, threads, shmem, stream>>>(
         query, page_pool, slot_mapping, output,

@@ -6,33 +6,28 @@
 #include <cuda_fp16.h>
 #include "tq_config.h"
 
+// K interleaved layout: each 4-bit nibble encodes one head-dim element as
+//   bits [2:0] = 3-bit Lloyd-Max code  (0-7)
+//   bit  [3]   = 1-bit QJL residual sign
+// This merges the old separate k3_codes + kres streams into one region,
+// keeping the same 64 bytes for D=128 (48+16 → 64).
 struct TQTurboProdPageLayout {
     size_t page_size_bytes;
 
-    size_t k3_codes_offset;
-    size_t k_residual_offset;
-    size_t k_residual_scales_offset;
-    size_t k_scales_offset;
+    size_t k4_codes_offset;          // interleaved K nibbles: (resbit<<3)|code3
+    size_t k_residual_scales_offset; // per-token-head QJL residual RMS  (half)
+    size_t k_scales_offset;          // per-token-head K RMS              (half)
 
     size_t v4_codes_offset;
     size_t v_scales_offset;
 
-    int k3_bytes_per_token_head;
-    int kres_bytes_per_token_head;
-    int v4_bytes_per_token_head;
-    int scale_bytes_per_token_head;
+    int k4_bytes_per_token_head;     // (D + 1) / 2
+    int v4_bytes_per_token_head;     // (D * 4 + 7) / 8  ==  D / 2 for even D
+    int scale_bytes_per_token_head;  // sizeof(half)
 };
 
 __host__ __device__ inline int ceil_div_int(int a, int b) {
     return (a + b - 1) / b;
-}
-
-__host__ __device__ inline int packed_3bit_bytes(int n) {
-    return ceil_div_int(n * 3, 8);
-}
-
-__host__ __device__ inline int packed_1bit_bytes(int n) {
-    return ceil_div_int(n, 8);
 }
 
 __host__ __device__ inline int packed_4bit_bytes(int n) {

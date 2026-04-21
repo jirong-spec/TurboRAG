@@ -34,17 +34,18 @@ class TQConfig(ctypes.Structure):
 
 
 class TQTurboProdPageLayout(ctypes.Structure):
-    """Matches tq_turbo_prod.cuh :: TQTurboProdPageLayout."""
+    """Matches tq_turbo_prod.cuh :: TQTurboProdPageLayout.
+
+    K interleaved nibble: bits[2:0]=code3, bit[3]=resbit.
+    """
     _fields_ = [
         ("page_size_bytes",            c_size_t),
-        ("k3_codes_offset",            c_size_t),
-        ("k_residual_offset",          c_size_t),
+        ("k4_codes_offset",            c_size_t),
         ("k_residual_scales_offset",   c_size_t),
         ("k_scales_offset",            c_size_t),
         ("v4_codes_offset",            c_size_t),
         ("v_scales_offset",            c_size_t),
-        ("k3_bytes_per_token_head",    c_int),
-        ("kres_bytes_per_token_head",  c_int),
+        ("k4_bytes_per_token_head",    c_int),
         ("v4_bytes_per_token_head",    c_int),
         ("scale_bytes_per_token_head", c_int),
     ]
